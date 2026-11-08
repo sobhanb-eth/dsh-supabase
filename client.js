@@ -62,7 +62,9 @@ window.__ModuleLoader__.load({
 				safetyDestructive: 'Destructive SQL: DROP, TRUNCATE, or DELETE/UPDATE without WHERE',
 				safetyCostly: 'Chargeable operations: creating projects or branches',
 				safetyProject: 'Project-affecting operations: deploys, branch merges, resets, deletions, pauses',
-				safetyNote: 'Toggles live in the plugin configuration (Plugins, then Supabase). Confirmations add to DSH approval prompts rather than replacing them.',
+				safetyNote: 'Toggles live in the plugin configuration (Plugins, then Supabase). Confirmations add to DSH approval prompts rather than replacing them. In sessions that disable approval prompts, a confirmation becomes a clear block instead of a silent rejection, so switch a category off here to let those calls through.',
+				guardOn: 'On',
+				guardOff: 'Off',
 				capabilities: 'What this plugin provides',
 				capTools: 'Supabase MCP tools (mcp__supabase__*): query data, manage migrations, deploy Edge Functions, read logs and advisors, search docs',
 				capSkills: 'Agent skills: supabase and supabase-postgres-best-practices, loaded on demand',
@@ -123,7 +125,9 @@ window.__ModuleLoader__.load({
 				safetyDestructive: '破坏性 SQL：DROP、TRUNCATE，或没有 WHERE 的 DELETE/UPDATE',
 				safetyCostly: '计费操作：创建项目或分支',
 				safetyProject: '影响项目的操作：部署、分支合并、重置、删除、暂停',
-				safetyNote: '开关位于插件配置（插件，然后 Supabase）。确认是对 DSH 审批提示的补充，不会替代审批。',
+				safetyNote: '开关位于插件配置（插件，然后 Supabase）。确认是对 DSH 审批提示的补充，不会替代审批。在禁用审批提示的会话中，确认会变成明确的阻止而不是静默拒绝，可在此关闭某个类别以放行。',
+				guardOn: '开',
+				guardOff: '关',
 				capabilities: '本插件提供',
 				capTools: 'Supabase MCP 工具（mcp__supabase__*）：查询数据、管理迁移、部署 Edge Functions、读取日志与顾问、搜索文档',
 				capSkills: '智能体技能：supabase 与 supabase-postgres-best-practices，按需加载',
@@ -301,7 +305,7 @@ window.__ModuleLoader__.load({
 					const [token, setToken] = React.useState('');
 					const [busy, setBusy] = React.useState(false);
 					const [status, setStatus] = React.useState('');
-					const [conn, setConn] = React.useState(() => ({ tokenConfigured: null, source: null, authMethod: 'none', toolsCount: 0, toolsReady: false, error: null }));
+					const [conn, setConn] = React.useState(() => ({ tokenConfigured: null, source: null, authMethod: 'none', toolsCount: 0, toolsReady: false, guardrails: null, error: null }));
 					const [showLink, setShowLink] = React.useState(false);
 					const [copied, setCopied] = React.useState(false);
 					const [signInUrl, setSignInUrl] = React.useState(() => authStartUrl());
@@ -317,6 +321,7 @@ window.__ModuleLoader__.load({
 								authMethod: typeof host.authMethod === 'string' ? host.authMethod : 'none',
 								toolsCount: typeof host.toolsCount === 'number' ? host.toolsCount : 0,
 								toolsReady: Boolean(host.toolsReady),
+								guardrails: host.guardrails && typeof host.guardrails === 'object' ? host.guardrails : null,
 								error: null
 							});
 							return;
@@ -458,6 +463,28 @@ window.__ModuleLoader__.load({
 						: conn.tokenConfigured === false ? t('tokenMissing') : t('statusUnconfirmed');
 					const toolsLine = conn.toolsReady ? `${conn.toolsCount} ${t('toolsReadyCount')}` : t('toolsWaiting');
 
+					const toggleGuard = async (key) => {
+						const current = conn.guardrails && typeof conn.guardrails[key] === 'boolean' ? conn.guardrails[key] : true;
+						const category = key === 'confirmDestructiveSql' ? 'destructive' : key === 'confirmCostlyOperations' ? 'costly' : 'project';
+						try {
+							if (typeof fetch === 'function') {
+								await fetch(`/api/supabase/guard?confirm=1&${category}=${current ? 'off' : 'on'}`, { headers: { accept: 'text/html' } });
+							}
+						} catch { /* the refresh below reports the truth either way */ }
+						refresh();
+					};
+					const guardButton = (key, label) => {
+						const on = conn.guardrails && typeof conn.guardrails[key] === 'boolean' ? conn.guardrails[key] : true;
+						return h('div', { className: 'dsh-supabase-row' },
+							h('span', { className: 'dsh-supabase-value', style: { flex: '1' } }, label),
+							h('button', {
+								className: on ? 'dsh-supabase-btn dsh-supabase-btn-primary' : 'dsh-supabase-btn dsh-supabase-btn-ghost',
+								type: 'button',
+								onClick: () => toggleGuard(key)
+							}, on ? t('guardOn') : t('guardOff'))
+						);
+					};
+
 					const disconnectAccess = async () => {
 						setNotice(t('disconnectStarted'));
 						const candidates = [...new Set([
@@ -553,11 +580,9 @@ window.__ModuleLoader__.load({
 						h('div', { className: 'dsh-supabase-card' },
 							h('h3', { className: 'dsh-supabase-title' }, t('safety')),
 							h('p', { className: 'dsh-supabase-sub' }, t('safetyIntro')),
-							h('ul', { className: 'dsh-supabase-list' },
-								h('li', null, t('safetyDestructive')),
-								h('li', null, t('safetyCostly')),
-								h('li', null, t('safetyProject'))
-							),
+							guardButton('confirmDestructiveSql', t('safetyDestructive')),
+							guardButton('confirmCostlyOperations', t('safetyCostly')),
+							guardButton('confirmProjectAffecting', t('safetyProject')),
 							h('p', { className: 'dsh-supabase-note' }, t('safetyNote'))
 						),
 						h('div', { className: 'dsh-supabase-card' },

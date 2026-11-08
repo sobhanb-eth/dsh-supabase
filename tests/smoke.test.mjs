@@ -19,9 +19,10 @@ import assert from "node:assert/strict";
 const { apply } = await import("../index.js");
 
 function makeCtx() {
-	const recorded = { providers: [], sections: [], listeners: [], commands: [], tools: [], edited: [], routes: [], sets: [], unsets: [], deleted: [], records: [] };
+	const recorded = { providers: [], sections: [], listeners: [], commands: [], tools: [], edited: [], routes: [], sets: [], unsets: [], deleted: [], records: [], approvalPolicy: undefined };
 	const recordStore = new Map();
 	const ctx = {
+		fiber: { entry: { id: "supabase", name: "dsh-supabase" } },
 		effect(fn) {
 			const gen = fn();
 			for (const _disposer of gen) { /* registration walk */ }
@@ -56,6 +57,9 @@ function makeCtx() {
 			definitions: () => [...recorded.tools, { name: "mcp__supabase__list_tables" }, { name: "mcp__supabase__execute_sql" }]
 		},
 		get(name) {
+			if (name === "approval") {
+				return { overrideOf: () => recorded.approvalPolicy };
+			}
 			if (name === "credentials") {
 				return {
 					describe: async () => ({ configured: true, source: "test-store" }),
@@ -172,11 +176,12 @@ assert.equal(recorded.sections.length, 1, "one prompt section");
 assert.ok(recorded.sections[0].text.includes("mcp__supabase__"), "guidance names the tool namespace");
 
 // Auth routes registered on the web server, each mirrored under /api for the shell fetch bridge.
-assert.equal(recorded.routes.length, 8, "four routes, each mirrored under /api");
+assert.equal(recorded.routes.length, 10, "five routes, each mirrored under /api");
 const paths = recorded.routes.map((r) => r.path);
 assert.deepEqual(paths, [
 	"/supabase/auth/whoami", "/api/supabase/auth/whoami",
 	"/supabase/auth/disconnect", "/api/supabase/auth/disconnect",
+	"/supabase/guard", "/api/supabase/guard",
 	"/supabase/auth/start", "/api/supabase/auth/start",
 	"/supabase/auth/callback", "/api/supabase/auth/callback"
 ]);
@@ -232,9 +237,9 @@ const failed = await callbackRoute.resource(new Request(`http://127.0.0.1:63928/
 assert.ok((await failed.text()).includes("client_secret required"), "server error body is echoed on failure");
 tokenFailBody = undefined;
 
-// Commands: five registered with distinct plugin-namespaced identities.
-assert.deepEqual(recorded.commands.map((c) => c.name), ["supabase", "supabase-auth", "supabase-connect", "supabase-disconnect", "supabase-review"]);
-assert.equal(new Set(recorded.commands.map((c) => c.definitionId)).size, 5, "each command carries its own definitionId");
+// Commands: six registered with distinct plugin-namespaced identities.
+assert.deepEqual(recorded.commands.map((c) => c.name), ["supabase", "supabase-auth", "supabase-connect", "supabase-disconnect", "supabase-guard", "supabase-review"]);
+assert.equal(new Set(recorded.commands.map((c) => c.definitionId)).size, 6, "each command carries its own definitionId");
 const status = await recorded.commands[0].handler({});
 assert.equal(status.kind, "success");
 assert.ok(status.text.includes("Supabase integration status"), "status command output");
@@ -247,7 +252,7 @@ assert.ok(auth.text.includes("/supabase/auth/start"), "auth command returns the 
 const connect = await recorded.commands[2].handler({});
 assert.equal(connect.kind, "success");
 assert.ok(connect.text.includes("reloaded"), "connect command reloads the MCP row");
-assert.deepEqual(recorded.edited.at(-1), { entryId: "mcp-row-42", config: { toolCallTimeoutMs: 60001 } }, "reconnect nudges the matched MCP row");
+assert.ok(recorded.edited.some((e) => e.entryId === "mcp-row-42" && e.config.toolCallTimeoutMs === 60001), "reconnect nudges the matched MCP row");
 const review = await recorded.commands.find((c) => c.name === "supabase-review").handler({});
 assert.ok(review.text.includes("RLS is enabled"), "review checklist output");
 
@@ -309,6 +314,38 @@ assert.equal(injectTable.length, 1, "one index injection row");
 assert.equal(injectTable[0].kind, "global", "global boot row");
 assert.equal(injectTable[0].name, "__DSH_SUPABASE__");
 assert.equal(injectTable[0].value.authStartUrl, "http://127.0.0.1:63928/supabase/auth/start", "Host origin carried to the page");
+
+// Approval-policy aware guardrail: without prompts, deny with guidance instead
+// of an ask the session would auto-reject as "the user rejected tool".
+recorded.approvalPolicy = "never";
+const blocked = await call("mcp__supabase__apply_migration", { name: "m", query: "drop table users" });
+assert.equal(blocked.kind, "deny", "no prompts means a clear block, not a phantom ask");
+assert.equal(blocked.info.code, "SUPABASE_GUARD_CONFIRMATION_UNAVAILABLE");
+assert.ok(blocked.reason.includes("/supabase-guard"), "the block explains how to unblock");
+recorded.approvalPolicy = undefined;
+const reAsk = await call("mcp__supabase__apply_migration", { name: "m", query: "drop table users" });
+assert.equal(reAsk.kind, "ask", "with prompts available the ask returns");
+
+// Guardrail command: status, toggles persisted to this plugin's row, usage help.
+const guardCmd = recorded.commands.find((c) => c.name === "supabase-guard");
+const guardStatus = await guardCmd.handler({ rawInput: "" });
+assert.ok(guardStatus.text.includes("destructive SQL asks"), "guard status reports current toggles");
+const guardEditStart = recorded.edited.length;
+const guardToggle = await guardCmd.handler({ rawInput: "project off" });
+assert.equal(guardToggle.kind, "success");
+assert.equal(recorded.edited.length, guardEditStart + 1, "toggle persists through the config editor");
+assert.equal(recorded.edited.at(-1).entryId, "supabase", "the plugin edits its own row");
+assert.equal(recorded.edited.at(-1).config.confirmProjectAffecting, false, "project confirmations switched off");
+const guardBad = await guardCmd.handler({ rawInput: "project maybe" });
+assert.equal(guardBad.kind, "error", "invalid usage is rejected");
+
+// Guard settings route: confirmation required, then the same persistence.
+const guardRoute = recorded.routes.find((r) => r.path === "/supabase/guard");
+const guardNoConfirm = await guardRoute.resource(new Request("http://127.0.0.1:63928/supabase/guard?destructive=off"));
+assert.ok((await guardNoConfirm.text()).includes("Confirm guardrail change"), "guard route requires confirmation");
+const guardOk = await guardRoute.resource(new Request("http://127.0.0.1:63928/supabase/guard?confirm=1&destructive=off"));
+assert.ok((await guardOk.text()).includes("saved"), "guard route saves the toggle");
+assert.equal(recorded.edited.at(-1).config.confirmDestructiveSql, false, "destructive confirmations switched off");
 
 // Disconnect is terminal: run it last, after every test that needs the grant.
 const disconnectRoute = recorded.routes.find((r) => r.path === "/supabase/auth/disconnect");
@@ -463,7 +500,8 @@ const whoamiPayload = {
 	tokenSource: "file",
 	authMethod: "browser sign-in (Supabase account)",
 	toolsCount: 31,
-	toolsReady: true
+	toolsReady: true,
+	guardrails: { confirmDestructiveSql: true, confirmCostlyOperations: true, confirmProjectAffecting: true }
 };
 globalThis.fetch = async (url) => {
 	const target = String(url);
@@ -497,11 +535,16 @@ delete globalThis.__DSH_SUPABASE__;
 
 // --- Live status: three-state display driven by the Host snapshot ----------
 const disconnectCalls = [];
+const guardCalls = [];
 globalThis.fetch = async (url) => {
 	const target = String(url);
 	if (target.includes("whoami")) return { ok: true, json: async () => whoamiPayload };
 	if (target.includes("disconnect")) {
 		disconnectCalls.push(target);
+		return { ok: true };
+	}
+	if (target.includes("guard")) {
+		guardCalls.push(target);
 		return { ok: true };
 	}
 	throw new Error(`unexpected fetch ${target}`);
@@ -517,6 +560,12 @@ const statusFlat = JSON.stringify(statusPage);
 assert.ok(statusFlat.includes("t:tokenConfigured"), "confirmed state shown from the Host snapshot");
 assert.ok(statusFlat.includes("31 t:toolsReadyCount"), "live MCP tool count shown");
 assert.ok(statusFlat.includes("t:disconnectLabel"), "disconnect action present");
+
+// Guardrail toggles are on the page and reach the Host with confirmation.
+const guardBtn = findElem(statusPage, (n) => n.type === "button" && n.children?.[0] === "t:guardOn");
+assert.ok(guardBtn, "guardrail toggle present");
+await guardBtn.props.onClick();
+assert.ok(guardCalls.some((u) => u.includes("guard?confirm=1") && u.includes("destructive=off")), "toggle sends the confirmed change");
 
 // Disconnect sends the confirmed sign-out and reports it.
 const disconnectBtn = findElem(statusPage, (n) => n.type === "button" && n.children?.[0] === "t:disconnectLabel");

@@ -50,6 +50,8 @@ const AUTH_CALLBACK_PATH = "/supabase/auth/callback";
 const AUTH_WHOAMI_PATH = "/supabase/auth/whoami";
 /** Local route path that signs out and revokes stored credentials. */
 const AUTH_DISCONNECT_PATH = "/supabase/auth/disconnect";
+/** Local route path that adjusts guardrail toggles from the settings page. */
+const GUARD_SETTINGS_PATH = "/supabase/guard";
 /** Pages bridge fetch through the /api channel, so routes are mirrored there. */
 const API_PREFIX = "/api";
 /** The hosted Supabase MCP endpoint this bundle connects to. */
@@ -133,7 +135,7 @@ function buildSkillProvider() {
 // System prompt guidance (detail lives in the skills; this orients the model)
 // ---------------------------------------------------------------------------
 
-const GUIDANCE = `Supabase tools (mcp__supabase__*) connect to the user's Supabase projects. Load the supabase skill before Supabase work and supabase-postgres-best-practices before writing Postgres SQL or schema changes. Prefer the search_docs tool over recalling Supabase APIs from memory. Use the narrowest tool and query that answers the task: the connection may be project-scoped or read-only, and those limits are intentional. Destructive SQL, chargeable operations (create_project, create_branch), and project-affecting calls pause for explicit user confirmation. Never work around a confirmation or simulate its result. Never print access tokens, service_role keys, or secret values into chat, files, or tool arguments.`;
+const GUIDANCE = `Supabase tools (mcp__supabase__*) connect to the user's Supabase projects. Load the supabase skill before Supabase work and supabase-postgres-best-practices before writing Postgres SQL or schema changes. Prefer the search_docs tool over recalling Supabase APIs from memory. Use the narrowest tool and query that answers the task: the connection may be project-scoped or read-only, and those limits are intentional. Destructive SQL, chargeable operations (create_project, create_branch), and project-affecting calls pause for explicit user confirmation. Never work around a confirmation or simulate its result. If a call is blocked because the session disables approval prompts, the error explains how the user can adjust the guardrails with /supabase-guard; relay that instead of retrying. Never print access tokens, service_role keys, or secret values into chat, files, or tool arguments.`;
 
 // ---------------------------------------------------------------------------
 // Guardrail: ask before risky Supabase MCP calls (the hooks equivalent)
@@ -532,6 +534,56 @@ async function statusText(ctx, config) {
 	].join("\n");
 }
 
+/**
+ * Persist guardrail toggles to this plugin's own Loader row. Editing an
+ * ordinary config field rebuilds the plugin with the new values immediately.
+ */
+async function setGuardToggles(ctx, updates) {
+	const editor = ctx.get("configEditor");
+	const entry = ctx.fiber?.entry;
+	if (editor === undefined || entry === undefined) {
+		return "Guardrail settings cannot be saved in this profile. Edit the supabase row configuration manually instead.";
+	}
+	try {
+		await editor.edit(entry, (current) => ({ ...current, ...updates }));
+		return `Saved: ${Object.entries(updates).map(([key, value]) => `${key}=${value}`).join(", ")}. The change applies immediately.`;
+	} catch (error) {
+		return `Could not save guardrail settings: ${error instanceof Error ? error.message : String(error)}`;
+	}
+}
+
+/** Parse "/supabase-guard ..." into a config update, a status reply, or usage. */
+async function guardCommand(ctx, config, rawInput) {
+	const arg = String(rawInput ?? "").trim().toLowerCase();
+	const current = {
+		destructive: config.confirmDestructiveSql !== false,
+		costly: config.confirmCostlyOperations !== false,
+		project: config.confirmProjectAffecting !== false
+	};
+	const words = arg.split(/\s+/).filter(Boolean);
+	if (arg === "" || words[0] === "status") {
+		return {
+			kind: "success",
+			text: `Supabase guardrails: destructive SQL ${current.destructive ? "asks" : "off"}; chargeable operations ${current.costly ? "asks" : "off"}; project-affecting operations ${current.project ? "asks" : "off"}.\nUsage: /supabase-guard destructive|costly|project|all on|off. When a session disables approval prompts, an "asks" confirmation becomes a clear block instead of a silent rejection; switch a category off to let those calls through in such a session.`
+		};
+	}
+	const toggle = (word) => (word === "on" ? true : word === "off" ? false : undefined);
+	let updates;
+	if (words[0] === "all") {
+		const value = toggle(words[1]);
+		if (value === undefined) return { kind: "error", text: "Usage: /supabase-guard all on|off" };
+		updates = { confirmDestructiveSql: value, confirmCostlyOperations: value, confirmProjectAffecting: value };
+	} else if (words[0] === "destructive" || words[0] === "costly" || words[0] === "project") {
+		const value = toggle(words[1]);
+		if (value === undefined) return { kind: "error", text: `Usage: /supabase-guard ${words[0]} on|off` };
+		const key = words[0] === "destructive" ? "confirmDestructiveSql" : words[0] === "costly" ? "confirmCostlyOperations" : "confirmProjectAffecting";
+		updates = { [key]: value };
+	} else {
+		return { kind: "error", text: "Usage: /supabase-guard status, or destructive|costly|project|all on|off" };
+	}
+	return { kind: "success", text: await setGuardToggles(ctx, updates) };
+}
+
 /** Best-effort RFC 7009 token revocation; local cleanup happens regardless. */
 async function revokeGrant(ctx, fetchFn, log) {
 	try {
@@ -633,11 +685,33 @@ function apply(ctx, config) {
 			yield ctx.on("tools/pre-execute", async (exec, next) => {
 				if (typeof exec.name !== "string" || !exec.name.startsWith("mcp__supabase__")) return next();
 				const tool = exec.name.slice("mcp__supabase__".length);
+				// In sessions whose approval policy never prompts, an `ask`
+				// auto-rejects and surfaces as a misleading "user rejected".
+				// Deny with actionable guidance there instead, and ask only
+				// where a real human prompt can appear.
+				let canAsk = true;
+				try {
+					const approval = ctx.get("approval");
+					const policy = approval?.overrideOf?.(exec.agent?.session);
+					canAsk = policy !== "never";
+				} catch { /* assume prompting works */ }
+				const confirm = (category, reason, en, zh) => {
+					if (canAsk) return askDecision(reason, en, zh);
+					return {
+						kind: "deny",
+						reason: `${reason}. Confirmation prompts are disabled in this session, so this call is blocked instead of silently approved. To proceed, run /supabase-guard to adjust the guardrails (for example: /supabase-guard ${category} off), or use a session where approval prompts are enabled. The tool body was not executed.`,
+						info: {
+							name: "SupabaseGuardConfirmationUnavailable",
+							code: "SUPABASE_GUARD_CONFIRMATION_UNAVAILABLE"
+						}
+					};
+				};
 				if (tool === "execute_sql" || tool === "apply_migration") {
 					if (!toggles.confirmDestructiveSql) return next();
 					const sql = collectStrings(exec.arguments ?? {}, []).join("\n");
 					if (DESTRUCTIVE_SQL_PATTERNS.some((pattern) => pattern.test(sql))) {
-						return askDecision(
+						return confirm(
+							"destructive",
 							`${exec.name} contains destructive SQL (drops, truncates, or DELETE/UPDATE without WHERE)`,
 							`${exec.name} contains destructive SQL (DROP, TRUNCATE, or DELETE/UPDATE without WHERE). Confirm to run it against the database.`,
 							`${exec.name} 包含破坏性 SQL（DROP、TRUNCATE，或没有 WHERE 的 DELETE/UPDATE）。确认后才会对数据库执行。`
@@ -647,7 +721,8 @@ function apply(ctx, config) {
 				}
 				if (CONFIRM_CATEGORIES.costly.includes(tool)) {
 					if (!toggles.confirmCostlyOperations) return next();
-					return askDecision(
+					return confirm(
+						"costly",
 						`${exec.name} creates billable Supabase resources`,
 						`${exec.name} creates billable Supabase resources. Confirm to proceed (charges may apply).`,
 						`${exec.name} 会创建计费的 Supabase 资源。确认后才会继续（可能产生费用）。`
@@ -655,7 +730,8 @@ function apply(ctx, config) {
 				}
 				if (CONFIRM_CATEGORIES.projectAffecting.includes(tool)) {
 					if (!toggles.confirmProjectAffecting) return next();
-					return askDecision(
+					return confirm(
+						"project",
 						`${exec.name} changes or affects an existing Supabase project`,
 						`${exec.name} changes or affects an existing Supabase project (deploys, branch operations, pauses, or deletions). Confirm to proceed.`,
 						`${exec.name} 会更改或影响现有 Supabase 项目（部署、分支操作、暂停或删除）。确认后才会继续。`
@@ -695,7 +771,8 @@ function apply(ctx, config) {
 							tokenSource: snapshot.tokenSource ?? null,
 							authMethod: snapshot.authMethod,
 							toolsCount: snapshot.toolsCount,
-							toolsReady: snapshot.toolsReady
+							toolsReady: snapshot.toolsReady,
+							guardrails: snapshot.guardrails
 						}, { headers: { "access-control-allow-origin": "*" } });
 					}
 				},
@@ -708,6 +785,33 @@ function apply(ctx, config) {
 						}
 						const text = await disconnect(ctx, fetchFn, log);
 						return resultPage("Supabase disconnected", "Your Supabase sign-in is revoked and the stored tokens are removed. The MCP tools are unloading. You can close this tab and sign in again any time.");
+					}
+				},
+				{
+					path: GUARD_SETTINGS_PATH,
+					resource: async (request) => {
+						const params = new URL(request.url).searchParams;
+						if (params.get("confirm") !== "1") {
+							return resultPage("Confirm guardrail change", "This link changes the Supabase safety confirmations. Start it from the Supabase settings page so the change is intentional.");
+						}
+						const parse = (name) => {
+							const value = params.get(name);
+							if (value === "on") return true;
+							if (value === "off") return false;
+							return undefined;
+						};
+						const updates = {};
+						const destructive = parse("destructive");
+						const costly = parse("costly");
+						const project = parse("project");
+						if (destructive !== undefined) updates.confirmDestructiveSql = destructive;
+						if (costly !== undefined) updates.confirmCostlyOperations = costly;
+						if (project !== undefined) updates.confirmProjectAffecting = project;
+						if (Object.keys(updates).length === 0) {
+							return resultPage("Nothing changed", "No guardrail setting was provided.");
+						}
+						const text = await setGuardToggles(ctx, updates);
+						return resultPage("Guardrail settings saved", `${text} You can close this tab.`);
 					}
 				},
 				{
@@ -803,6 +907,11 @@ function apply(ctx, config) {
 				name: "supabase-disconnect",
 				description: "Sign out of Supabase, revoke the sign-in, and remove stored tokens",
 				handler: handler(async () => ({ kind: "success", text: await disconnect(ctx, fetchFn, log) }))
+			},
+			{
+				name: "supabase-guard",
+				description: "Show or change the Supabase safety confirmations (status, destructive|costly|project|all on|off)",
+				handler: handler(async (invocation) => guardCommand(ctx, toggles, invocation.rawInput))
 			},
 			{
 				name: "supabase-review",
