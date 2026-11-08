@@ -181,16 +181,41 @@ window.__ModuleLoader__.load({
 					}
 				}
 
-				function authStartUrl() {
+				function syncSignInUrl() {
+					// 1) Host-published boot value (server-rendered pages).
 					try {
 						const injected = (typeof globalThis !== 'undefined' && globalThis.__DSH_SUPABASE__) || (typeof window !== 'undefined' && window.__DSH_SUPABASE__);
 						if (injected && typeof injected.authStartUrl === 'string' && injected.authStartUrl.indexOf('http') === 0) return injected.authStartUrl;
-					} catch { /* fall through */ }
+					} catch { /* try the next source */ }
+					// 2) The shell-carried Host origin (static desktop pages).
+					try {
+						const transport = (typeof globalThis !== 'undefined' && globalThis.__DSH_TRANSPORT__) || (typeof window !== 'undefined' && window.__DSH_TRANSPORT__);
+						const base = transport && typeof transport.streamBaseUrl === 'string' ? transport.streamBaseUrl : '';
+						if (base.indexOf('http') === 0) return new URL('/supabase/auth/start', base).toString();
+					} catch { /* try the next source */ }
+					// 3) The page origin (browser-served pages).
 					try {
 						const origin = (typeof window !== 'undefined' && window.location && typeof window.location.origin === 'string') ? window.location.origin : '';
 						if (origin.indexOf('http') === 0) return origin + '/supabase/auth/start';
-					} catch { /* fall through */ }
+					} catch { /* no source left */ }
 					return '';
+				}
+
+				// 4) Last resort: ask the Host through the shell's fetch bridge.
+				async function probeSignInUrl() {
+					try {
+						if (typeof fetch !== 'function') return '';
+						const response = await fetch('/api/supabase/auth/whoami', { headers: { accept: 'application/json' } });
+						if (response && response.ok) {
+							const data = await response.json();
+							if (data && typeof data.authStartUrl === 'string' && data.authStartUrl.indexOf('http') === 0) return data.authStartUrl;
+						}
+					} catch { /* no source left */ }
+					return '';
+				}
+
+				function authStartUrl() {
+					return syncSignInUrl();
 				}
 
 				function ErrorCard(props) {
@@ -230,6 +255,7 @@ window.__ModuleLoader__.load({
 					const [configured, setConfigured] = React.useState(null);
 					const [showLink, setShowLink] = React.useState(false);
 					const [copied, setCopied] = React.useState(false);
+					const [signInUrl, setSignInUrl] = React.useState(() => authStartUrl());
 
 					const refresh = React.useCallback(() => {
 						const remote = credentialsRemote();
@@ -294,21 +320,33 @@ window.__ModuleLoader__.load({
 					};
 
 					const endpoint = 'https://mcp.supabase.com/mcp';
-					const signInUrl = authStartUrl();
-					const openSignIn = () => {
+					const resolveUrl = async () => {
+						const sync = syncSignInUrl();
+						if (sync) {
+							setSignInUrl(sync);
+							return sync;
+						}
+						const probed = await probeSignInUrl();
+						if (probed) setSignInUrl(probed);
+						return probed;
+					};
+					const openSignIn = async () => {
 						setShowLink(true);
-						if (!signInUrl) return;
+						const url = await resolveUrl();
+						if (!url) return;
 						try {
-							const opened = window.open(signInUrl, '_blank', 'noopener');
+							const opened = window.open(url, '_blank', 'noopener');
 							if (opened && typeof opened === 'object' && 'opener' in opened) opened.opener = null;
 						} catch { /* the copyable link below covers shells that block opens */ }
 					};
-					const copySignInLink = () => {
-						if (!signInUrl) return;
+					const copySignInLink = async () => {
+						setShowLink(true);
+						const url = await resolveUrl();
+						if (!url) return;
 						const done = () => setCopied(true);
 						try {
 							if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-								Promise.resolve(navigator.clipboard.writeText(signInUrl)).then(done, done);
+								Promise.resolve(navigator.clipboard.writeText(url)).then(done, done);
 							} else {
 								done();
 							}
@@ -340,13 +378,14 @@ window.__ModuleLoader__.load({
 							h('h3', { className: 'dsh-supabase-title' }, t('signInTitle')),
 							h('p', { className: 'dsh-supabase-sub' }, t('authIntro')),
 							h('p', { className: 'dsh-supabase-sub' }, t('signInBody')),
-							signInUrl ? h('div', { className: 'dsh-supabase-actions' },
+							h('div', { className: 'dsh-supabase-actions' },
 								h('button', { className: 'dsh-supabase-btn dsh-supabase-btn-primary', type: 'button', onClick: openSignIn }, t('signInButton')),
 								h('button', { className: 'dsh-supabase-btn dsh-supabase-btn-ghost', type: 'button', onClick: copySignInLink }, t('copyLink'))
-							) : h('p', { className: 'dsh-supabase-note' }, t('signInNoUrl')),
+							),
 							showLink && signInUrl ? h('div', { className: 'dsh-supabase-row' },
 								h('a', { className: 'dsh-supabase-link', href: signInUrl, target: '_blank', rel: 'noreferrer' }, signInUrl)
 							) : null,
+							showLink && !signInUrl ? h('p', { className: 'dsh-supabase-note' }, t('signInNoUrl')) : null,
 							copied ? h('p', { className: 'dsh-supabase-status', 'aria-live': 'polite' }, t('copied')) : null,
 							h('p', { className: 'dsh-supabase-note' }, t('signInNote'))
 						),

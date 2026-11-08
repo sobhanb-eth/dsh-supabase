@@ -46,6 +46,10 @@ const SKILL_RANK = 600;
 const AUTH_START_PATH = "/supabase/auth/start";
 /** Local route path the browser returns to after signing in. */
 const AUTH_CALLBACK_PATH = "/supabase/auth/callback";
+/** Local route path that reports the Host origin to the settings page. */
+const AUTH_WHOAMI_PATH = "/supabase/auth/whoami";
+/** Pages bridge fetch through the /api channel, so routes are mirrored there. */
+const API_PREFIX = "/api";
 /** The hosted Supabase MCP endpoint this bundle connects to. */
 const DEFAULT_MCP_URL = "https://mcp.supabase.com/mcp";
 
@@ -536,53 +540,70 @@ function apply(ctx, config) {
 				if (origin === undefined) return;
 				table.push({ kind: "global", name: "__DSH_SUPABASE__", value: { authStartUrl: `${origin}${AUTH_START_PATH}` } });
 			});
-			yield webServer.register({
-				kind: "exact",
-				path: AUTH_START_PATH,
-				resource: async () => {
-					try {
-						const redirectUri = `${safeOrigin(ctx)}${AUTH_CALLBACK_PATH}`;
-						const { url } = await buildAuthorizeUrl(redirectUri, fetchFn, mcpUrl());
-						return new Response(null, { status: 302, headers: { location: url } });
-					} catch (error) {
-						return resultPage("Sign-in could not start", `Could not reach Supabase sign-in: ${error instanceof Error ? error.message : String(error)}. You can paste a personal access token in Settings instead.`);
+			// The whoami route lets any shell discover the real Host origin, and
+			// every route is mirrored under /api so page-side fetch can reach it
+			// through the shell's fetch bridge.
+			const routes = [
+				{
+					path: AUTH_WHOAMI_PATH,
+					resource: () => {
+						const origin = safeOrigin(ctx);
+						return Response.json({
+							authStartUrl: origin === undefined ? "" : `${origin}${AUTH_START_PATH}`,
+							origin: origin ?? ""
+						}, { headers: { "access-control-allow-origin": "*" } });
 					}
-				}
-			});
-			yield webServer.register({
-				kind: "exact",
-				path: AUTH_CALLBACK_PATH,
-				resource: async (request) => {
-					const params = new URL(request.url).searchParams;
-					try {
-						const errorParam = params.get("error");
-						if (errorParam !== null) {
-							return resultPage("Sign-in was cancelled", `Supabase reported: ${errorParam}. You can try again or paste a personal access token in Settings.`);
+				},
+				{
+					path: AUTH_START_PATH,
+					resource: async () => {
+						try {
+							const redirectUri = `${safeOrigin(ctx)}${AUTH_CALLBACK_PATH}`;
+							const { url } = await buildAuthorizeUrl(redirectUri, fetchFn, mcpUrl());
+							return new Response(null, { status: 302, headers: { location: url } });
+						} catch (error) {
+							return resultPage("Sign-in could not start", `Could not reach Supabase sign-in: ${error instanceof Error ? error.message : String(error)}. You can paste a personal access token in Settings instead.`);
 						}
-						const state = params.get("state") ?? "";
-						const pending = pendingAuth.get(state);
-						pendingAuth.delete(state);
-						if (pending === undefined) return resultPage("Sign-in could not finish", "The sign-in attempt expired or was already used. Start again from Settings.");
-						const code = params.get("code");
-						if (code === null) return resultPage("Sign-in could not finish", "No authorization code arrived. Start again from Settings.");
-						const metadata = await discoverOAuth(mcpUrl(), fetchFn);
-						const clientId = await registerClient(metadata, pending.redirectUri, fetchFn);
-						const tokens = await exchangeCode(metadata, clientId, pending, code, fetchFn);
-						if (typeof tokens.access_token !== "string") throw new Error("the token response carried no access token");
-						await commitGrant(ctx, {
-							refresh_token: typeof tokens.refresh_token === "string" ? tokens.refresh_token : "",
-							token_url: metadata.tokenEndpoint,
-							client_id: clientId,
-							expires_at: Date.now() + (tokens.expires_in ?? 3600) * 1000
-						});
-						await commitAccessToken(ctx, tokens.access_token);
-						scheduleRefresh(ctx, tokens.expires_in, metadata, clientId, fetchFn, log);
-						return resultPage("Supabase connected", "You are signed in with your Supabase account. The organization you chose during sign-in decides which projects this session can reach. Close this tab and return to DeepSeek Harness.");
-					} catch (error) {
-						return resultPage("Sign-in could not finish", `The token exchange failed: ${error instanceof Error ? error.message : String(error)}. You can paste a personal access token in Settings instead.`);
+					}
+				},
+				{
+					path: AUTH_CALLBACK_PATH,
+					resource: async (request) => {
+						const params = new URL(request.url).searchParams;
+						try {
+							const errorParam = params.get("error");
+							if (errorParam !== null) {
+								return resultPage("Sign-in was cancelled", `Supabase reported: ${errorParam}. You can try again or paste a personal access token in Settings.`);
+							}
+							const state = params.get("state") ?? "";
+							const pending = pendingAuth.get(state);
+							pendingAuth.delete(state);
+							if (pending === undefined) return resultPage("Sign-in could not finish", "The sign-in attempt expired or was already used. Start again from Settings.");
+							const code = params.get("code");
+							if (code === null) return resultPage("Sign-in could not finish", "No authorization code arrived. Start again from Settings.");
+							const metadata = await discoverOAuth(mcpUrl(), fetchFn);
+							const clientId = await registerClient(metadata, pending.redirectUri, fetchFn);
+							const tokens = await exchangeCode(metadata, clientId, pending, code, fetchFn);
+							if (typeof tokens.access_token !== "string") throw new Error("the token response carried no access token");
+							await commitGrant(ctx, {
+								refresh_token: typeof tokens.refresh_token === "string" ? tokens.refresh_token : "",
+								token_url: metadata.tokenEndpoint,
+								client_id: clientId,
+								expires_at: Date.now() + (tokens.expires_in ?? 3600) * 1000
+							});
+							await commitAccessToken(ctx, tokens.access_token);
+							scheduleRefresh(ctx, tokens.expires_in, metadata, clientId, fetchFn, log);
+							return resultPage("Supabase connected", "You are signed in with your Supabase account. The organization you chose during sign-in decides which projects this session can reach. Close this tab and return to DeepSeek Harness.");
+						} catch (error) {
+							return resultPage("Sign-in could not finish", `The token exchange failed: ${error instanceof Error ? error.message : String(error)}. You can paste a personal access token in Settings instead.`);
+						}
 					}
 				}
-			});
+			];
+			for (const route of routes) {
+				yield webServer.register({ kind: "exact", path: route.path, resource: route.resource });
+				yield webServer.register({ kind: "exact", path: `${API_PREFIX}${route.path}`, resource: route.resource });
+			}
 			record(true, "auth-routes");
 		} catch (error) {
 			record(false, "auth-routes", error instanceof Error ? error.message : error);
@@ -629,7 +650,9 @@ function apply(ctx, config) {
 		for (const command of commands) {
 			try {
 				yield ctx.commands.register({
-					definitionId: commandDefinitionId("dsh-supabase"),
+					// Each definition carries its own plugin-namespaced identity;
+					// the client catalog resolves aliases by definition id.
+					definitionId: commandDefinitionId(`dsh-supabase/${command.name}`),
 					name: command.name,
 					description: command.description,
 					handler: command.handler

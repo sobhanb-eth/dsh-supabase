@@ -148,11 +148,23 @@ assert.ok(loadedPg.content.includes("Postgres best practices"), "vendored postgr
 assert.equal(recorded.sections.length, 1, "one prompt section");
 assert.ok(recorded.sections[0].text.includes("mcp__supabase__"), "guidance names the tool namespace");
 
-// Auth routes registered on the web server.
-assert.equal(recorded.routes.length, 2, "two OAuth routes");
-assert.deepEqual(recorded.routes.map((r) => r.path), ["/supabase/auth/start", "/supabase/auth/callback"]);
-const startRoute = recorded.routes[0];
-const callbackRoute = recorded.routes[1];
+// Auth routes registered on the web server, mirrored under /api for the shell fetch bridge.
+assert.equal(recorded.routes.length, 6, "three routes, each mirrored under /api");
+const paths = recorded.routes.map((r) => r.path);
+assert.deepEqual(paths, [
+	"/supabase/auth/whoami", "/api/supabase/auth/whoami",
+	"/supabase/auth/start", "/api/supabase/auth/start",
+	"/supabase/auth/callback", "/api/supabase/auth/callback"
+]);
+const startRoute = recorded.routes.find((r) => r.path === "/supabase/auth/start");
+const callbackRoute = recorded.routes.find((r) => r.path === "/supabase/auth/callback");
+const whoamiRoute = recorded.routes.find((r) => r.path === "/api/supabase/auth/whoami");
+
+// Whoami reports the Host origin to any shell.
+const whoami = await whoamiRoute.resource(new Request("http://127.0.0.1:63928/api/supabase/auth/whoami"));
+assert.equal(whoami.status, 200, "whoami answers");
+const whoamiBody = await whoami.json();
+assert.equal(whoamiBody.authStartUrl, "http://127.0.0.1:63928/supabase/auth/start", "whoami reports the sign-in URL");
 
 // Browser OAuth start: discovery + DCR + PKCE redirect.
 const startResponse = await startRoute.resource(new Request("http://127.0.0.1:63928/supabase/auth/start"));
@@ -186,8 +198,9 @@ assert.ok((await badState.text()).includes("expired"), "unknown state gets a fri
 const declined = await callbackRoute.resource(new Request("http://127.0.0.1:63928/supabase/auth/callback?error=access_denied"));
 assert.ok((await declined.text()).includes("cancelled"), "declined sign-in gets a friendly page");
 
-// Commands: four registered, handlers produce real output.
+// Commands: four registered with distinct plugin-namespaced identities.
 assert.deepEqual(recorded.commands.map((c) => c.name), ["supabase", "supabase-auth", "supabase-connect", "supabase-review"]);
+assert.equal(new Set(recorded.commands.map((c) => c.definitionId)).size, 4, "each command carries its own definitionId");
 const status = await recorded.commands[0].handler({});
 assert.equal(status.kind, "success");
 assert.ok(status.text.includes("Supabase integration status"), "status command output");
@@ -352,51 +365,74 @@ const findElem = (node, pred) => {
 	return undefined;
 };
 
-// Desktop-like shell: no usable page origin, so the guidance fallback shows.
+// Desktop-like shell: no usable page origin. The buttons are always visible.
 window.location = { origin: "null" };
+delete globalThis.__DSH_TRANSPORT__;
 const page = renderPage();
 assert.equal(page.type, "div", "settings page renders a root div");
 const flat = JSON.stringify(page);
 assert.ok(flat.includes("tokenPlaceholder"), "PAT form present");
-assert.ok(flat.includes("t:signInNoUrl"), "guidance shown when no URL is known");
+assert.ok(flat.includes("t:signInButton"), "sign-in button always present");
+assert.ok(flat.includes("t:copyLink"), "copy action always present");
+assert.ok(!flat.includes("t:signInNoUrl"), "guidance waits for a failed attempt");
 
-// With an http page origin the sign-in and copy actions appear.
-window.location = { origin: "http://127.0.0.1:63928" };
-const page2 = renderPage();
-const flat2 = JSON.stringify(page2);
-assert.ok(flat2.includes("t:signInButton"), "sign-in button present");
-assert.ok(flat2.includes("t:copyLink"), "copy-link action present");
-assert.ok(!flat2.includes("t:signInNoUrl"), "guidance hidden when a URL is known");
-
-// Clicking the button attempts a browser open and reveals the copyable link
-// even when the shell swallows the open (window.open returning null).
+// Clicking with no URL source and a dead probe reveals the guidance, never a dead end.
 const opened = [];
 window.open = (url) => {
 	opened.push(url);
 	return null;
 };
+const realFetch2 = globalThis.fetch;
+globalThis.fetch = async () => {
+	throw new Error("bridge unavailable");
+};
+hookState.length = 0;
+let page2 = renderPage();
 const signInButton = findElem(page2, (n) => n.type === "button" && n.children?.[0] === "t:signInButton");
-assert.ok(signInButton, "sign-in button element found");
-signInButton.props.onClick();
-assert.deepEqual(opened, ["http://127.0.0.1:63928/supabase/auth/start"], "button opens the sign-in URL");
-const page3 = renderPage();
-assert.ok(JSON.stringify(page3).includes("http://127.0.0.1:63928/supabase/auth/start"), "fallback link row revealed after the click");
+await signInButton.props.onClick();
+page2 = renderPage();
+assert.ok(JSON.stringify(page2).includes("t:signInNoUrl"), "guidance shown after a failed attempt");
+assert.deepEqual(opened, [], "nothing opened without a URL");
+
+// The shell-carried Host origin (static desktop pages) supplies the URL.
+globalThis.__DSH_TRANSPORT__ = { streamBaseUrl: "http://transport.example" };
+hookState.length = 0;
+let page3 = renderPage();
+const signInButton2 = findElem(page3, (n) => n.type === "button" && n.children?.[0] === "t:signInButton");
+opened.length = 0;
+await signInButton2.props.onClick();
+assert.deepEqual(opened, ["http://transport.example/supabase/auth/start"], "transport base URL is used");
+page3 = renderPage();
+assert.ok(JSON.stringify(page3).includes("http://transport.example/supabase/auth/start"), "link row revealed");
+delete globalThis.__DSH_TRANSPORT__;
+
+// The whoami probe through the fetch bridge supplies the URL.
+globalThis.fetch = async (url) => {
+	assert.equal(String(url), "/api/supabase/auth/whoami");
+	return { ok: true, json: async () => ({ authStartUrl: "http://probe.example/supabase/auth/start" }) };
+};
+hookState.length = 0;
+let page4 = renderPage();
+const signInButton3 = findElem(page4, (n) => n.type === "button" && n.children?.[0] === "t:signInButton");
+opened.length = 0;
+await signInButton3.props.onClick();
+assert.deepEqual(opened, ["http://probe.example/supabase/auth/start"], "probed Host URL is used");
 
 // The copy button reports success even without a clipboard API.
-const copyButton = findElem(page3, (n) => n.type === "button" && n.children?.[0] === "t:copyLink");
+const copyButton = findElem(renderPage(), (n) => n.type === "button" && n.children?.[0] === "t:copyLink");
 assert.ok(copyButton, "copy button element found");
-copyButton.props.onClick();
-const page4 = renderPage();
-assert.ok(JSON.stringify(page4).includes("t:copied"), "copy feedback shown");
+await copyButton.props.onClick();
+assert.ok(JSON.stringify(renderPage()).includes("t:copied"), "copy feedback shown");
+globalThis.fetch = realFetch2;
 
-// An injected Host URL wins over the page origin (Desktop shells).
+// An injected Host URL wins over everything else (server-rendered pages).
 globalThis.__DSH_SUPABASE__ = { authStartUrl: "http://injected.example/supabase/auth/start" };
-window.location = { origin: "null" };
-const page5 = renderPage();
-const signInButton2 = findElem(page5, (n) => n.type === "button" && n.children?.[0] === "t:signInButton");
-assert.ok(signInButton2, "injected URL keeps the button available");
+window.location = { origin: "http://page.example" };
+hookState.length = 0;
+let page5 = renderPage();
+const signInButton4 = findElem(page5, (n) => n.type === "button" && n.children?.[0] === "t:signInButton");
 opened.length = 0;
-signInButton2.props.onClick();
+await signInButton4.props.onClick();
 assert.deepEqual(opened, ["http://injected.example/supabase/auth/start"], "injected Host URL is used");
 delete globalThis.__DSH_SUPABASE__;
 
