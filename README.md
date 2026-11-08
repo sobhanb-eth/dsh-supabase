@@ -15,16 +15,24 @@ Connect DeepSeek Harness agents to Supabase projects with the official Supabase 
 | Settings page | Settings, then Supabase: both sign-in paths, live connection status, guardrail documentation, and getting-started steps, in English and Chinese. |
 | Auto-reconnect | Signing in or rotating a token reloads the MCP connection automatically. |
 
-## Install
+## Install in two clicks (Discover tab)
 
-From a local checkout or any directory containing this package:
+No agent session or tokens needed:
 
-1. Ask the agent to install the bundle with `plugin_manager install_bundle`, pointing at this package directory.
-2. Confirm the Plugins page shows Supabase with its icon and description.
-3. Open Settings, then Supabase, and sign in with either method.
-4. In any session, run `/supabase-connect`, then ask something like "What tables are in my database?"
+1. In DSH, open **Plugins** and make sure the **Custom plugin indexes** plugin is enabled (it adds the Discover tab).
+2. Open **Discover**, add this index source: `https://raw.githubusercontent.com/sobhanb-eth/dsh-supabase/main/index.json`
+3. Search for **Supabase**, open the entry, and click **Install**. Done.
 
-Distributing publicly: publish this directory as a git repository and add it as a custom plugin index (Plugins, then Discover), or ship it inside your own plugin index. The package has no dependencies and no build step.
+The index is a standard DSH plugin market index (format 1) with a commit-pinned Git source, so the Discover tab installs exactly the reviewed release. The entry page shows this README as its detail document.
+
+## Install in other ways
+
+- **Ask the agent**: `plugin_manager install_bundle` with target `git+https://github.com/sobhanb-eth/dsh-supabase.git#<commit>` (the spec the Discover tab uses), or pointing at a local checkout of this package.
+- **From source**: clone this repository, then install the bundle from the checkout directory.
+
+After any install: confirm the Plugins page shows Supabase with its icon and description, open Settings then Supabase, sign in with either method, and run `/supabase-connect` in any session.
+
+The package has no dependencies and no build step.
 
 ## Signing in
 
@@ -49,7 +57,11 @@ The bundle patch (`cordis.patch.yml`) inserts two rows: `supabase` (this plugin)
 
 ## Tests
 
-`npm test` runs an end-to-end suite against the real plugin artifacts: skill loading over the vendored files, the guardrail decision table, all commands, the agent tool, the credential watch, the full browser OAuth flow (discovery, dynamic client registration, PKCE, callback, token commit) against a stubbed authorization server, and the settings page render including its error boundary.
+`npm test` runs two suites against the real plugin artifacts. The smoke suite covers skill loading over the vendored files, the guardrail decision table, all commands, the agent tool, the credential watch, the full browser OAuth flow (discovery, dynamic client registration, PKCE, callback, token commit) against a stubbed authorization server, and the settings page render including its error boundary. The market suite validates `index.json` against the DSH plugin market index format 1 rules.
+
+## Cutting a release
+
+Commit the release state on `main`, note its full SHA, then update `index.json`: set that SHA in the version's `source.commit` and its Unix time in `publishTimestamp`. Commit the index update and push. The index pins release commits, so `main` stays clean and the Discover tab always installs a reviewed state.
 
 ## Known limitations
 

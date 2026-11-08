@@ -6,7 +6,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "node tests/smoke.test.mjs"
+    "test": "node tests/smoke.test.mjs && node tests/market-index.test.mjs"
   },
   "keywords": ["supabase", "postgres", "mcp", "skills", "database", "dsh"],
   "exports": {
