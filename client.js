@@ -275,6 +275,29 @@ window.__ModuleLoader__.load({
 
 					React.useEffect(() => { refresh(); }, [refresh]);
 
+					// The status must stay fresh across the browser round-trip of a
+					// sign-in, so refetch whenever the user comes back to the app.
+					React.useEffect(() => {
+						const onFocus = () => refresh();
+						const onVisible = () => {
+							try {
+								if (typeof document === "undefined" || document.visibilityState !== "hidden") refresh();
+							} catch {
+								refresh();
+							}
+						};
+						try {
+							if (typeof window !== "undefined" && typeof window.addEventListener === "function") window.addEventListener("focus", onFocus);
+							if (typeof document !== "undefined" && typeof document.addEventListener === "function") document.addEventListener("visibilitychange", onVisible);
+						} catch { /* nothing to detach */ }
+						return () => {
+							try {
+								if (typeof window !== "undefined" && typeof window.removeEventListener === "function") window.removeEventListener("focus", onFocus);
+								if (typeof document !== "undefined" && typeof document.removeEventListener === "function") document.removeEventListener("visibilitychange", onVisible);
+							} catch { /* nothing to detach */ }
+						};
+					}, [refresh]);
+
 					const save = () => {
 						const remote = credentialsRemote();
 						if (!remote || typeof remote.set !== 'function') { setStatus(t('storeUnavailable')); return; }

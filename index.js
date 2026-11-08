@@ -468,6 +468,15 @@ async function statusText(ctx, config) {
 		} catch { /* keep the fallback */ }
 	}
 	const endpoint = process.env.SUPABASE_MCP_URL || DEFAULT_MCP_URL;
+	let toolsState = "none yet (they appear once the connection authenticates)";
+	let toolsReady = false;
+	try {
+		const live = ctx.tools.definitions().filter((definition) => typeof definition.name === "string" && definition.name.startsWith("mcp__supabase__"));
+		if (live.length > 0) {
+			toolsState = `${live.length} ready (mcp__supabase__*)`;
+			toolsReady = true;
+		}
+	} catch { /* keep the fallback */ }
 	const failed = diagnostics.filter((entry) => !entry.ok);
 	const origin = typeof ctx.get === "function" ? safeOrigin(ctx) : undefined;
 	return [
@@ -475,13 +484,15 @@ async function statusText(ctx, config) {
 		`- Access token: ${tokenState}`,
 		`- Sign-in method: ${authMethod}`,
 		`- MCP endpoint: ${endpoint}`,
-		"- MCP tools: mcp__supabase__* (they appear once the connection authenticates)",
+		`- MCP tools: ${toolsState}`,
 		"- Skills: supabase, supabase-postgres-best-practices",
 		`- Guardrails: destructive SQL ${config.confirmDestructiveSql ? "asks" : "off"}; chargeable operations ${config.confirmCostlyOperations ? "asks" : "off"}; project-affecting operations ${config.confirmProjectAffecting ? "asks" : "off"}`,
 		failed.length === 0 ? "- Features: all registered" : `- Features: ${failed.length} failed (${failed.map((entry) => entry.feature).join(", ")})`,
-		tokenState.startsWith("configured")
-			? "Next step: run /supabase-connect to reload the connection, then ask the agent to list your tables."
-			: `Next step: open Settings > Supabase and click "Connect Supabase account", or paste a scoped personal access token.${origin === undefined ? "" : ` Browser sign-in link: ${origin}${AUTH_START_PATH}`}`
+		toolsReady
+			? "Next step: ask the agent something, for example: What tables are in my database?"
+			: tokenState.startsWith("configured")
+				? "Next step: run /supabase-connect to reload the connection, then ask the agent to list your tables."
+				: `Next step: open Settings > Supabase and click "Connect Supabase account", or paste a scoped personal access token.${origin === undefined ? "" : ` Browser sign-in link: ${origin}${AUTH_START_PATH}`}`
 	].join("\n");
 }
 

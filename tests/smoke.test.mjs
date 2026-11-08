@@ -52,7 +52,8 @@ function makeCtx() {
 			register(definition) {
 				recorded.tools.push(definition);
 				return () => {};
-			}
+			},
+			definitions: () => [...recorded.tools, { name: "mcp__supabase__list_tables" }, { name: "mcp__supabase__execute_sql" }]
 		},
 		get(name) {
 			if (name === "credentials") {
@@ -230,6 +231,7 @@ const status = await recorded.commands[0].handler({});
 assert.equal(status.kind, "success");
 assert.ok(status.text.includes("Supabase integration status"), "status command output");
 assert.ok(status.text.includes("configured (test-store)"), "status reads the credential store");
+assert.ok(status.text.includes("2 ready (mcp__supabase__*)"), "status reports the live MCP tool count");
 assert.ok(status.text.includes("browser sign-in"), "status reports the sign-in method");
 const auth = await recorded.commands[1].handler({});
 assert.equal(auth.kind, "success");
