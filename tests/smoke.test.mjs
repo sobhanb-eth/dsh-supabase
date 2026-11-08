@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 const { apply } = await import("../index.js");
 
 function makeCtx() {
-	const recorded = { providers: [], sections: [], listeners: [], commands: [], tools: [], edited: [], routes: [], sets: [], unsets: [], deleted: [], records: [], approvalPolicy: undefined };
+	const recorded = { providers: [], sections: [], listeners: [], commands: [], tools: [], edited: [], routes: [], sets: [], unsets: [], deleted: [], records: [], approvalPolicy: undefined, questions: [], nextAnswer: undefined, questionsDisabled: false };
 	const recordStore = new Map();
 	const ctx = {
 		fiber: { entry: { id: "supabase", name: "dsh-supabase" } },
@@ -59,6 +59,15 @@ function makeCtx() {
 		get(name) {
 			if (name === "approval") {
 				return { overrideOf: () => recorded.approvalPolicy };
+			}
+			if (name === "userQuestions") {
+				if (recorded.questionsDisabled) return undefined;
+				return {
+					ask: async (request) => {
+						recorded.questions.push(request);
+						return recorded.nextAnswer;
+					}
+				};
 			}
 			if (name === "credentials") {
 				return {
@@ -278,6 +287,13 @@ decision = await call("mcp__supabase__apply_migration", { query: "truncate table
 assert.equal(decision.kind, "ask", "TRUNCATE asks");
 decision = await call("mcp__supabase__execute_sql", { query: "select * from users where id = 1" });
 assert.equal(decision.kind, "allow", "SELECT passes");
+decision = await call("mcp__supabase__apply_migration", {
+	name: "m",
+	query: "create table t (id int); alter table t enable row level security; create policy p on t for update to authenticated using (true); grant select, insert, update on t to anon, authenticated;"
+});
+assert.equal(decision.kind, "allow", "standard DDL and GRANT are not destructive");
+decision = await call("mcp__supabase__execute_sql", { query: "drop table users" });
+assert.ok(decision.reason.includes("DROP"), "the block names the matched pattern");
 decision = await call("mcp__supabase__execute_sql", { query: "delete from users where id = 1" });
 assert.equal(decision.kind, "allow", "DELETE with WHERE passes");
 decision = await call("mcp__supabase__execute_sql", { query: "update users set active = true where id = 1" });
@@ -315,13 +331,28 @@ assert.equal(injectTable[0].kind, "global", "global boot row");
 assert.equal(injectTable[0].name, "__DSH_SUPABASE__");
 assert.equal(injectTable[0].value.authStartUrl, "http://127.0.0.1:63928/supabase/auth/start", "Host origin carried to the page");
 
-// Approval-policy aware guardrail: without prompts, deny with guidance instead
-// of an ask the session would auto-reject as "the user rejected tool".
+// Without approval prompts the guard asks through the user-question dialogue,
+// the channel that works even where prompts are disabled (proven by the
+// ask_user_question flow in real sessions).
 recorded.approvalPolicy = "never";
-const blocked = await call("mcp__supabase__apply_migration", { name: "m", query: "drop table users" });
-assert.equal(blocked.kind, "deny", "no prompts means a clear block, not a phantom ask");
-assert.equal(blocked.info.code, "SUPABASE_GUARD_CONFIRMATION_UNAVAILABLE");
-assert.ok(blocked.reason.includes("/supabase-guard"), "the block explains how to unblock");
+recorded.nextAnswer = { answers: [{ id: "supabase-guard", selected: ["Yes, proceed"] }] };
+const viaDialogue = await call("mcp__supabase__apply_migration", { name: "m", query: "drop table users" });
+assert.equal(viaDialogue.kind, "allow", "an approved question answer runs the call");
+assert.equal(recorded.questions.length, 1, "the confirmation used the question dialogue");
+assert.ok(recorded.questions[0].agent !== undefined, "the question is routed to the calling agent");
+recorded.nextAnswer = { answers: [{ id: "supabase-guard", selected: ["No, cancel"] }] };
+const declinedByUser = await call("mcp__supabase__apply_migration", { name: "m", query: "drop table users" });
+assert.equal(declinedByUser.kind, "deny", "a declined answer blocks the call");
+assert.equal(declinedByUser.info.code, "SUPABASE_GUARD_DECLINED");
+recorded.nextAnswer = { answers: [{ id: "supabase-guard", selected: [] }] };
+const skippedByUser = await call("mcp__supabase__apply_migration", { name: "m", query: "drop table users" });
+assert.equal(skippedByUser.kind, "deny", "a skipped answer is never permission");
+recorded.questionsDisabled = true;
+const noChannel = await call("mcp__supabase__apply_migration", { name: "m", query: "drop table users" });
+assert.equal(noChannel.kind, "deny", "no channel means a clear block, not a phantom ask");
+assert.equal(noChannel.info.code, "SUPABASE_GUARD_CONFIRMATION_UNAVAILABLE");
+assert.ok(noChannel.reason.includes("/supabase guard"), "the block names the user-side remedies");
+recorded.questionsDisabled = false;
 recorded.approvalPolicy = undefined;
 const reAsk = await call("mcp__supabase__apply_migration", { name: "m", query: "drop table users" });
 assert.equal(reAsk.kind, "ask", "with prompts available the ask returns");
@@ -338,6 +369,15 @@ assert.equal(recorded.edited.at(-1).entryId, "supabase", "the plugin edits its o
 assert.equal(recorded.edited.at(-1).config.confirmProjectAffecting, false, "project confirmations switched off");
 const guardBad = await guardCmd.handler({ rawInput: "project maybe" });
 assert.equal(guardBad.kind, "error", "invalid usage is rejected");
+
+// The /supabase command carries the guard subcommand for robust dispatch,
+// since some clients only recognize well-known command names.
+const supabaseCmd = recorded.commands.find((c) => c.name === "supabase");
+const viaSub = await supabaseCmd.handler({ rawInput: "guard destructive off" });
+assert.equal(viaSub.kind, "success");
+assert.equal(recorded.edited.at(-1).config.confirmDestructiveSql, false, "subcommand persists the toggle");
+const badSub = await supabaseCmd.handler({ rawInput: "nonsense" });
+assert.equal(badSub.kind, "error", "unknown subcommand shows usage");
 
 // Guard settings route: confirmation required, then the same persistence.
 const guardRoute = recorded.routes.find((r) => r.path === "/supabase/guard");

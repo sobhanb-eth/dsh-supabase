@@ -135,22 +135,30 @@ function buildSkillProvider() {
 // System prompt guidance (detail lives in the skills; this orients the model)
 // ---------------------------------------------------------------------------
 
-const GUIDANCE = `Supabase tools (mcp__supabase__*) connect to the user's Supabase projects. Load the supabase skill before Supabase work and supabase-postgres-best-practices before writing Postgres SQL or schema changes. Prefer the search_docs tool over recalling Supabase APIs from memory. Use the narrowest tool and query that answers the task: the connection may be project-scoped or read-only, and those limits are intentional. Destructive SQL, chargeable operations (create_project, create_branch), and project-affecting calls pause for explicit user confirmation. Never work around a confirmation or simulate its result. If a call is blocked because the session disables approval prompts, the error explains how the user can adjust the guardrails with /supabase-guard; relay that instead of retrying. Never print access tokens, service_role keys, or secret values into chat, files, or tool arguments.`;
+const GUIDANCE = `Supabase tools (mcp__supabase__*) connect to the user's Supabase projects. Load the supabase skill before Supabase work and supabase-postgres-best-practices before writing Postgres SQL or schema changes. Prefer the search_docs tool over recalling Supabase APIs from memory. Use the narrowest tool and query that answers the task: the connection may be project-scoped or read-only, and those limits are intentional. Destructive SQL, chargeable operations (create_project, create_branch), and project-affecting calls pause for user confirmation through a question dialogue or approval dialog; standard DDL such as CREATE TABLE, CREATE POLICY, ALTER TABLE ... ENABLE ROW LEVEL SECURITY, and GRANT is not treated as destructive. Never work around a confirmation or simulate its result. If a call is blocked because no confirmation channel answered, relay the remedies in the error (Settings > Supabase Safety toggles or /supabase guard) instead of retrying. Never print access tokens, service_role keys, or secret values into chat, files, or tool arguments.`;
 
 // ---------------------------------------------------------------------------
 // Guardrail: ask before risky Supabase MCP calls (the hooks equivalent)
 // ---------------------------------------------------------------------------
 
-/** SQL shapes that can lose data or weaken security without a WHERE clause. */
+/**
+ * DML shapes that can lose data. Deliberately excludes DDL and DCL such as
+ * CREATE TABLE, CREATE POLICY ... FOR UPDATE, ALTER TABLE ... ENABLE ROW LEVEL
+ * SECURITY, and GRANT/REVOKE: those are standard, non-destructive statements
+ * and a keyword matcher must never flag them.
+ */
 const DESTRUCTIVE_SQL_PATTERNS = [
-	/\bdrop\s+(table|schema|database|function|trigger|view|index|role|user|policy|sequence|extension|type)\b/i,
-	/\btruncate(\s+table)?\b/i,
-	/\bdelete\s+from\b(?![^;]*\bwhere\b)/i,
-	/\bupdate\b[^;]*\bset\b(?![^;]*\bwhere\b)/i,
-	/\balter\s+table\b[^;]*\bdrop\b/i,
-	/\b(revoke|grant)\s+/i,
-	/\bcreate\s+(or\s+replace\s+)?(role|user)\b/i
+	{ pattern: /\bdrop\s+(table|schema|database|function|trigger|view|index|role|user|policy|sequence|extension|type)\b/i, what: "DROP" },
+	{ pattern: /\btruncate(\s+table)?\b/i, what: "TRUNCATE" },
+	{ pattern: /\bdelete\s+from\b(?![^;]*\bwhere\b)/i, what: "DELETE without WHERE" },
+	{ pattern: /\bupdate\b[^;]*\bset\b(?![^;]*\bwhere\b)/i, what: "UPDATE without WHERE" },
+	{ pattern: /\balter\s+table\b[^;]*\bdrop\b/i, what: "ALTER TABLE ... DROP" }
 ];
+
+/** Find which destructive pattern the SQL matches, if any. */
+function destructiveMatch(sql) {
+	return DESTRUCTIVE_SQL_PATTERNS.find((entry) => entry.pattern.test(sql));
+}
 
 /** Supabase MCP calls grouped by why they need explicit confirmation. */
 const CONFIRM_CATEGORIES = {
@@ -564,7 +572,7 @@ async function guardCommand(ctx, config, rawInput) {
 	if (arg === "" || words[0] === "status") {
 		return {
 			kind: "success",
-			text: `Supabase guardrails: destructive SQL ${current.destructive ? "asks" : "off"}; chargeable operations ${current.costly ? "asks" : "off"}; project-affecting operations ${current.project ? "asks" : "off"}.\nUsage: /supabase-guard destructive|costly|project|all on|off. When a session disables approval prompts, an "asks" confirmation becomes a clear block instead of a silent rejection; switch a category off to let those calls through in such a session.`
+			text: `Supabase guardrails: destructive SQL ${current.destructive ? "asks" : "off"}; chargeable operations ${current.costly ? "asks" : "off"}; project-affecting operations ${current.project ? "asks" : "off"}.\nUsage: /supabase guard destructive|costly|project|all on|off (the same works as /supabase-guard, and on Settings > Supabase). Risky calls ask for confirmation through the session's question dialogue where possible; switch a category off to let those calls through without asking.`
 		};
 	}
 	const toggle = (word) => (word === "on" ? true : word === "off" ? false : undefined);
@@ -685,44 +693,75 @@ function apply(ctx, config) {
 			yield ctx.on("tools/pre-execute", async (exec, next) => {
 				if (typeof exec.name !== "string" || !exec.name.startsWith("mcp__supabase__")) return next();
 				const tool = exec.name.slice("mcp__supabase__".length);
-				// In sessions whose approval policy never prompts, an `ask`
-				// auto-rejects and surfaces as a misleading "user rejected".
-				// Deny with actionable guidance there instead, and ask only
-				// where a real human prompt can appear.
+				// Confirmation strategy:
+				//  1. the standard approval dialog, when the session can prompt;
+				//  2. otherwise the user-question dialogue (the same channel as
+				//     ask_user_question), which works even where approval
+				//     prompts are disabled;
+				//  3. otherwise a clear block naming the user-side remedies.
 				let canAsk = true;
 				try {
 					const approval = ctx.get("approval");
 					const policy = approval?.overrideOf?.(exec.agent?.session);
 					canAsk = policy !== "never";
 				} catch { /* assume prompting works */ }
-				const confirm = (category, reason, en, zh) => {
+				const blocked = (reason) => ({
+					kind: "deny",
+					reason: `${reason}. No confirmation channel answered, so this call is blocked instead of silently approved. Remedies: the Safety toggles on Settings > Supabase, the chat command /supabase guard destructive off (or costly/project), or a session where approval prompts are enabled. The tool body was not executed.`,
+					info: {
+						name: "SupabaseGuardConfirmationUnavailable",
+						code: "SUPABASE_GUARD_CONFIRMATION_UNAVAILABLE"
+					}
+				});
+				const confirm = async (reason, en, zh) => {
 					if (canAsk) return askDecision(reason, en, zh);
-					return {
-						kind: "deny",
-						reason: `${reason}. Confirmation prompts are disabled in this session, so this call is blocked instead of silently approved. To proceed, run /supabase-guard to adjust the guardrails (for example: /supabase-guard ${category} off), or use a session where approval prompts are enabled. The tool body was not executed.`,
-						info: {
-							name: "SupabaseGuardConfirmationUnavailable",
-							code: "SUPABASE_GUARD_CONFIRMATION_UNAVAILABLE"
+					const userQuestions = ctx.get("userQuestions");
+					if (userQuestions !== undefined && exec.agent !== undefined) {
+						try {
+							const answer = await userQuestions.ask({
+								questions: [{
+									id: "supabase-guard",
+									question: en,
+									header: "Confirm",
+									options: [
+										{ label: "Yes, proceed", description: "Run this Supabase operation now." },
+										{ label: "No, cancel", description: "Do not run it." }
+									]
+								}],
+								agent: exec.agent,
+								signal: exec.signal
+							});
+							const item = (answer?.answers ?? []).find((entry) => entry.id === "supabase-guard");
+							const approved = (item?.selected ?? []).some((label) => String(label).startsWith("Yes"));
+							if (approved) return next();
+							return {
+								kind: "deny",
+								reason: `The user did not approve ${exec.name} (${reason}). The tool body was not executed.`,
+								info: { name: "SupabaseGuardDeclined", code: "SUPABASE_GUARD_DECLINED" }
+							};
+						} catch (error) {
+							if (exec.signal?.aborted) return { kind: "cancel" };
+							return blocked(`${reason} (the confirmation dialogue failed: ${error instanceof Error ? error.message : String(error)})`);
 						}
-					};
+					}
+					return blocked(reason);
 				};
 				if (tool === "execute_sql" || tool === "apply_migration") {
 					if (!toggles.confirmDestructiveSql) return next();
 					const sql = collectStrings(exec.arguments ?? {}, []).join("\n");
-					if (DESTRUCTIVE_SQL_PATTERNS.some((pattern) => pattern.test(sql))) {
-						return confirm(
-							"destructive",
-							`${exec.name} contains destructive SQL (drops, truncates, or DELETE/UPDATE without WHERE)`,
-							`${exec.name} contains destructive SQL (DROP, TRUNCATE, or DELETE/UPDATE without WHERE). Confirm to run it against the database.`,
-							`${exec.name} 包含破坏性 SQL（DROP、TRUNCATE，或没有 WHERE 的 DELETE/UPDATE）。确认后才会对数据库执行。`
+					const match = destructiveMatch(sql);
+					if (match !== undefined) {
+						return await confirm(
+							`${exec.name} contains destructive SQL (${match.what})`,
+							`${exec.name} contains destructive SQL (${match.what}). Confirm to run it against the database.`,
+							`${exec.name} 包含破坏性 SQL（${match.what}）。确认后才会对数据库执行。`
 						);
 					}
 					return next();
 				}
 				if (CONFIRM_CATEGORIES.costly.includes(tool)) {
 					if (!toggles.confirmCostlyOperations) return next();
-					return confirm(
-						"costly",
+					return await confirm(
 						`${exec.name} creates billable Supabase resources`,
 						`${exec.name} creates billable Supabase resources. Confirm to proceed (charges may apply).`,
 						`${exec.name} 会创建计费的 Supabase 资源。确认后才会继续（可能产生费用）。`
@@ -730,8 +769,7 @@ function apply(ctx, config) {
 				}
 				if (CONFIRM_CATEGORIES.projectAffecting.includes(tool)) {
 					if (!toggles.confirmProjectAffecting) return next();
-					return confirm(
-						"project",
+					return await confirm(
 						`${exec.name} changes or affects an existing Supabase project`,
 						`${exec.name} changes or affects an existing Supabase project (deploys, branch operations, pauses, or deletions). Confirm to proceed.`,
 						`${exec.name} 会更改或影响现有 Supabase 项目（部署、分支操作、暂停或删除）。确认后才会继续。`
@@ -882,8 +920,17 @@ function apply(ctx, config) {
 		const commands = [
 			{
 				name: "supabase",
-				description: "Show Supabase connection and safety status",
-				handler: handler(() => statusText(ctx, toggles).then((text) => ({ kind: "success", text })))
+				description: "Show Supabase status, or manage guardrails: /supabase guard status|destructive|costly|project|all on|off",
+				handler: handler(async (invocation) => {
+					const raw = String(invocation.rawInput ?? "").trim();
+					if (raw.toLowerCase().startsWith("guard")) {
+						return guardCommand(ctx, toggles, raw.slice("guard".length));
+					}
+					if (raw !== "") {
+						return { kind: "error", text: "Usage: /supabase (status), or /supabase guard status|destructive|costly|project|all on|off" };
+					}
+					return { kind: "success", text: await statusText(ctx, toggles) };
+				})
 			},
 			{
 				name: "supabase-auth",
