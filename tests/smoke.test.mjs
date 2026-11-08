@@ -618,7 +618,7 @@ assert.ok(statusFlat.includes("31 t:toolsReadyCount"), "live MCP tool count show
 assert.ok(statusFlat.includes("t:disconnectLabel"), "disconnect action present");
 
 // Guardrail toggles are on the page and reach the Host with confirmation.
-const guardBtn = findElem(statusPage, (n) => n.type === "button" && n.children?.[0] === "t:guardOn");
+const guardBtn = findElem(statusPage, (n) => n.type === "button" && n.props && n.props["aria-pressed"] === true && JSON.stringify(n.children ?? []).includes("t:guardOn"));
 assert.ok(guardBtn, "guardrail toggle present");
 await guardBtn.props.onClick();
 assert.ok(guardCalls.some((u) => u.includes("guard?confirm=1") && u.includes("destructive=off")), "toggle sends the confirmed change");
@@ -630,8 +630,9 @@ assert.deepEqual(clientCaptures.slotsInject, ["settings.section", "conversation.
 hookIndex = 0;
 const pillTree = pill.component();
 assert.ok(JSON.stringify(pillTree).includes("t:guardPillLabel"), "pill renders in the session UI");
-const pillButton = findElem(pillTree, (n) => n.type === "button" && n.children?.[0] === "t:guardOn");
-assert.ok(pillButton, "pill toggle present while guards are on");
+const pillButton = findElem(pillTree, (n) => n.type === "button");
+assert.ok(pillButton, "pill toggle present");
+assert.equal(pillButton.props["aria-pressed"], true, "pill reflects the guarded state");
 await pillButton.props.onClick();
 assert.ok(guardCalls.some((u) => u.includes("all=off")), "pill switches all guardrails off");
 

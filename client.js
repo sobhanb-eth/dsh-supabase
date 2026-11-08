@@ -65,7 +65,8 @@ window.__ModuleLoader__.load({
 				safetyNote: 'Toggles live in the plugin configuration (Plugins, then Supabase). Confirmations add to DSH approval prompts rather than replacing them. In sessions that disable approval prompts, a confirmation becomes a clear block instead of a silent rejection, so switch a category off here to let those calls through.',
 				guardOn: 'On',
 				guardOff: 'Off',
-				guardPillLabel: 'Supabase confirmations',
+				guardPillLabel: 'Supabase guard',
+				guardPillTooltip: 'Safety confirmations for Supabase operations. Click to switch on or off.',
 				capabilities: 'What this plugin provides',
 				capTools: 'Supabase MCP tools (mcp__supabase__*): query data, manage migrations, deploy Edge Functions, read logs and advisors, search docs',
 				capSkills: 'Agent skills: supabase and supabase-postgres-best-practices, loaded on demand',
@@ -129,7 +130,8 @@ window.__ModuleLoader__.load({
 				safetyNote: '开关位于插件配置（插件，然后 Supabase）。确认是对 DSH 审批提示的补充，不会替代审批。在禁用审批提示的会话中，确认会变成明确的阻止而不是静默拒绝，可在此关闭某个类别以放行。',
 				guardOn: '开',
 				guardOff: '关',
-				guardPillLabel: 'Supabase 确认',
+				guardPillLabel: 'Supabase 防护',
+				guardPillTooltip: 'Supabase 操作的安全确认。点击开关。',
 				capabilities: '本插件提供',
 				capTools: 'Supabase MCP 工具（mcp__supabase__*）：查询数据、管理迁移、部署 Edge Functions、读取日志与顾问、搜索文档',
 				capSkills: '智能体技能：supabase 与 supabase-postgres-best-practices，按需加载',
@@ -169,9 +171,13 @@ window.__ModuleLoader__.load({
 .dsh-supabase-link { color: var(--dsw-alias-brand-primary); text-decoration: none; }
 .dsh-supabase-link:hover { text-decoration: underline; }
 .dsh-supabase-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.dsh-supabase-pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 999px; background: var(--dsw-alias-bg-layer-1); font-size: 11px; color: var(--dsw-alias-label-secondary); }
-.dsh-supabase-pill-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
-.dsh-supabase-pill-btn { padding: 2px 8px; font-size: 11px; height: auto; }
+.dsh-supabase-chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 999px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; cursor: pointer; transition: background-color 140ms cubic-bezier(0.32, 0.72, 0, 1), transform 140ms cubic-bezier(0.32, 0.72, 0, 1); }
+.dsh-supabase-chip:hover { background: var(--dsw-alias-bg-layer-2); }
+.dsh-supabase-chip:active { transform: scale(0.97); }
+.dsh-supabase-chip:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+.dsh-supabase-chip-label { color: var(--dsw-alias-label-secondary); }
+.dsh-supabase-chip-state { font-weight: 500; color: var(--dsw-alias-label-primary); }
+@media (prefers-reduced-motion: reduce) { .dsh-supabase-chip { transition: none; } .dsh-supabase-chip:active { transform: none; } }
 `;
 
 		return {
@@ -483,10 +489,11 @@ window.__ModuleLoader__.load({
 						return h('div', { className: 'dsh-supabase-row' },
 							h('span', { className: 'dsh-supabase-value', style: { flex: '1' } }, label),
 							h('button', {
-								className: on ? 'dsh-supabase-btn dsh-supabase-btn-primary' : 'dsh-supabase-btn dsh-supabase-btn-ghost',
+								className: 'dsh-supabase-chip',
 								type: 'button',
+								'aria-pressed': on,
 								onClick: () => toggleGuard(key)
-							}, on ? t('guardOn') : t('guardOff'))
+							}, h('span', { className: 'dsh-supabase-chip-state' }, on ? t('guardOn') : t('guardOff')))
 						);
 					};
 
@@ -612,8 +619,9 @@ window.__ModuleLoader__.load({
 					);
 				}
 
-				// Ambient in-session control: a small pill in the composer dock so
-				// the guardrails can be switched without any slash command.
+				// Ambient in-session control: a status instrument in the composer
+				// dock, drawn in the ticker's own language (thin icon, quiet chip)
+				// so it reads as part of the harness rather than an add-on.
 				function SupabaseGuardPill() {
 					const [guardrails, setGuardrails] = React.useState(null);
 					const load = React.useCallback(async () => {
@@ -625,18 +633,32 @@ window.__ModuleLoader__.load({
 						if (!guardrails) return true;
 						return guardrails.confirmDestructiveSql !== false || guardrails.confirmCostlyOperations !== false || guardrails.confirmProjectAffecting !== false;
 					};
+					const on = anyOn();
 					const toggleAll = async () => {
 						try {
 							if (typeof fetch === 'function') {
-								await fetch(`/api/supabase/guard?confirm=1&all=${anyOn() ? 'off' : 'on'}`, { headers: { accept: 'text/html' } });
+								await fetch(`/api/supabase/guard?confirm=1&all=${on ? 'off' : 'on'}`, { headers: { accept: 'text/html' } });
 							}
 						} catch { /* the reload below reports the truth */ }
 						load();
 					};
-					return h('div', { className: 'dsh-supabase-pill' },
-						h('span', { className: 'dsh-supabase-pill-dot', style: { background: anyOn() ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-idle-primary)' } }),
-						h('span', null, t('guardPillLabel')),
-						h('button', { className: 'dsh-supabase-btn dsh-supabase-btn-ghost dsh-supabase-pill-btn', type: 'button', onClick: toggleAll }, anyOn() ? t('guardOn') : t('guardOff'))
+					return h('button', {
+						className: 'dsh-supabase-chip',
+						type: 'button',
+						'aria-pressed': on,
+						'aria-label': `${t('guardPillLabel')}: ${on ? t('guardOn') : t('guardOff')}`,
+						title: t('guardPillTooltip'),
+						onClick: toggleAll
+					},
+						h('svg', {
+							viewBox: '0 0 16 16', width: 13, height: 13, fill: 'none', 'aria-hidden': true,
+							style: { color: on ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-tertiary)', flex: 'none' }
+						},
+							h('path', { d: 'M8 1.6 3 3.4v3.4c0 3 2.1 5.6 5 6.6 2.9-1 5-3.6 5-6.6V3.4L8 1.6Z', stroke: 'currentColor', strokeWidth: 1.3, strokeLinejoin: 'round' }),
+							on ? h('path', { d: 'm5.9 7.7 1.5 1.5 2.7-2.9', stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round' }) : null
+						),
+						h('span', { className: 'dsh-supabase-chip-label' }, t('guardPillLabel')),
+						h('span', { className: 'dsh-supabase-chip-state' }, on ? t('guardOn') : t('guardOff'))
 					);
 				}
 
