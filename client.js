@@ -159,7 +159,7 @@ window.__ModuleLoader__.load({
 .dsh-supabase-value { font-size: 13px; color: var(--dsw-alias-label-primary); word-break: break-all; }
 .dsh-supabase-input { flex: 1; min-width: 220px; padding: 7px 10px; font-size: 13px; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; outline: none; }
 .dsh-supabase-input:focus { border-color: var(--dsw-alias-brand-primary); }
-.dsh-supabase-btn { display: inline-flex; align-items: center; padding: 8px 16px; font-size: 13px; font-weight: 600; border-radius: 6px; border: 1px solid transparent; cursor: pointer; text-decoration: none; }
+.dsh-supabase-btn { display: inline-flex; align-items: center; padding: 8px 16px; font-family: inherit; font-size: 13px; line-height: 20px; font-weight: 500; border-radius: 6px; border: 1px solid transparent; cursor: pointer; text-decoration: none; }
 .dsh-supabase-btn-primary { background: var(--dsw-alias-brand-primary); color: var(--dsw-alias-bg-base); }
 .dsh-supabase-btn-primary:disabled { opacity: 0.5; cursor: default; }
 .dsh-supabase-btn-ghost { background: transparent; color: var(--dsw-alias-label-secondary); border-color: var(--dsw-alias-border-l2); }
@@ -171,11 +171,12 @@ window.__ModuleLoader__.load({
 .dsh-supabase-link { color: var(--dsw-alias-brand-primary); text-decoration: none; }
 .dsh-supabase-link:hover { text-decoration: underline; }
 .dsh-supabase-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.dsh-supabase-chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 999px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; cursor: pointer; transition: background-color 140ms cubic-bezier(0.32, 0.72, 0, 1), transform 140ms cubic-bezier(0.32, 0.72, 0, 1); }
+.dsh-supabase-chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 999px; background: transparent; font-family: inherit; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); cursor: pointer; transition: background-color 140ms cubic-bezier(0.32, 0.72, 0, 1), transform 140ms cubic-bezier(0.32, 0.72, 0, 1); }
 .dsh-supabase-chip:hover { background: var(--dsw-alias-bg-layer-2); }
 .dsh-supabase-chip:active { transform: scale(0.97); }
 .dsh-supabase-chip:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
 .dsh-supabase-chip-label { color: var(--dsw-alias-label-secondary); }
+.dsh-supabase-chip-sep { color: var(--dsw-alias-label-tertiary); }
 .dsh-supabase-chip-state { font-weight: 500; color: var(--dsw-alias-label-primary); }
 @media (prefers-reduced-motion: reduce) { .dsh-supabase-chip { transition: none; } .dsh-supabase-chip:active { transform: none; } }
 `;
@@ -183,6 +184,19 @@ window.__ModuleLoader__.load({
 		return {
 			inject: ['slots', 'locale'],
 			apply(ctx) {
+				// Mount the global stylesheet once at plugin load, the pattern the
+				// shipped client modules use, so every component renders styled
+				// even before the settings page is ever opened.
+				try {
+					if (typeof document !== "undefined" && document.querySelector('style[data-plugin-css="dsh-supabase"]') === null) {
+						const tag = document.createElement("style");
+						tag.dataset.plugin = "dsh-supabase";
+						tag.dataset.pluginCss = "dsh-supabase";
+						tag.textContent = CSS;
+						document.head.appendChild(tag);
+					}
+				} catch { /* the page-level style element is a fallback */ }
+
 				// Locale namespace; en and zh are the required baselines.
 				let t = (key) => (DICT.en[key] ?? key);
 				try {
@@ -654,10 +668,11 @@ window.__ModuleLoader__.load({
 							viewBox: '0 0 16 16', width: 13, height: 13, fill: 'none', 'aria-hidden': true,
 							style: { color: on ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-tertiary)', flex: 'none' }
 						},
-							h('path', { d: 'M8 1.6 3 3.4v3.4c0 3 2.1 5.6 5 6.6 2.9-1 5-3.6 5-6.6V3.4L8 1.6Z', stroke: 'currentColor', strokeWidth: 1.3, strokeLinejoin: 'round' }),
-							on ? h('path', { d: 'm5.9 7.7 1.5 1.5 2.7-2.9', stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round' }) : null
+							h('path', { d: 'M8 1.7 3.4 3.4v3.2c0 2.8 1.8 5.1 4.6 6 2.8-.9 4.6-3.2 4.6-6V3.4L8 1.7Z', stroke: 'currentColor', strokeWidth: 1.25, strokeLinejoin: 'round' }),
+							on ? h('path', { d: 'm5.9 7.9 1.5 1.5 2.7-3', stroke: 'currentColor', strokeWidth: 1.25, strokeLinecap: 'round', strokeLinejoin: 'round' }) : null
 						),
 						h('span', { className: 'dsh-supabase-chip-label' }, t('guardPillLabel')),
+						h('span', { className: 'dsh-supabase-chip-sep' }, '·'),
 						h('span', { className: 'dsh-supabase-chip-state' }, on ? t('guardOn') : t('guardOff'))
 					);
 				}
