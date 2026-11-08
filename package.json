@@ -1,0 +1,27 @@
+{
+  "name": "dsh-supabase",
+  "version": "1.0.0",
+  "description": "Supabase for DeepSeek Harness: Supabase MCP tools, Supabase and Postgres agent skills, destructive-SQL and cost guardrails, and a Supabase settings page.",
+  "author": "dsh-supabase contributors",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "node tests/smoke.test.mjs"
+  },
+  "keywords": ["supabase", "postgres", "mcp", "skills", "database", "dsh"],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": ["index.js", "client.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "skills/**", "README.md", "LICENSE"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-settings"]
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Supabase",
+    "description": "Connects agents to Supabase projects through the Supabase MCP server, adds the Supabase and Postgres agent skills, and asks before destructive SQL and chargeable operations."
+  }
+}

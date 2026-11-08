@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Supabase for DSH">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#10382c"/>
+      <stop offset="1" stop-color="#0b231c"/>
+    </linearGradient>
+    <linearGradient id="cyl" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5ee9b5"/>
+      <stop offset="1" stop-color="#2fb386"/>
+    </linearGradient>
+    <linearGradient id="bolt" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8bf7d0"/>
+      <stop offset="1" stop-color="#39d3a0"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#bg)"/>
+  <g>
+    <ellipse cx="32" cy="21" rx="17" ry="6.5" fill="url(#cyl)"/>
+    <path d="M15 21 v9 c0 3.6 7.6 6.5 17 6.5 s17 -2.9 17 -6.5 v-9 c0 3.6 -7.6 6.5 -17 6.5 s-17 -2.9 -17 -6.5 z" fill="url(#cyl)"/>
+    <path d="M15 33 v9 c0 3.6 7.6 6.5 17 6.5 s17 -2.9 17 -6.5 v-9 c0 3.6 -7.6 6.5 -17 6.5 s-17 -2.9 -17 -6.5 z" fill="url(#cyl)" opacity="0.85"/>
+  </g>
+  <path d="M35 14 L24 32 h6.5 l-2.5 15 12 -19 h-6.5 z" fill="url(#bolt)"/>
+</svg>

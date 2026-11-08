@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Supabase",
+    "description": "通过 Supabase MCP 服务器把智能体连接到 Supabase 项目，提供 Supabase 与 Postgres 智能体技能，并在破坏性 SQL 与计费操作前请求确认。"
+  }
+}

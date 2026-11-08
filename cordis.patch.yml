@@ -1,0 +1,33 @@
+# dsh-supabase bundle patch.
+# Rows: the Supabase integration plugin (skills, guardrails, commands, settings UI)
+# and one Supabase MCP connection whose tools appear as mcp__supabase__*.
+#
+# Secrets never belong in this file. The Authorization header resolves the
+# SUPABASE_ACCESS_TOKEN credential (a stored credential value or environment
+# variable) through a Loader expression at activation. Set the token from the
+# Supabase settings page in DSH, or export SUPABASE_ACCESS_TOKEN, then run
+# /supabase-connect to reload the connection.
+- insert:
+    - id: supabase
+      name: 'dsh-supabase'
+      config:
+        # Ask before destructive SQL (DROP/TRUNCATE/DELETE/UPDATE without WHERE, ...).
+        confirmDestructiveSql: true
+        # Ask before operations that incur charges (create_project, create_branch).
+        confirmCostlyOperations: true
+        # Ask before project-affecting operations (deploys, branch deletion/merge, pauses).
+        confirmProjectAffecting: true
+
+    - id: supabase-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: supabase
+        transport: streamable-http
+        # Override with SUPABASE_MCP_URL to scope to a project or enable read-only
+        # mode, e.g. https://mcp.supabase.com/mcp?project_ref=<ref>&read_only=true
+        url: !!js "process.env.SUPABASE_MCP_URL || 'https://mcp.supabase.com/mcp'"
+        headers:
+          Authorization: !!js "process.env.SUPABASE_ACCESS_TOKEN ? 'Bearer ' + process.env.SUPABASE_ACCESS_TOKEN : ''"
+          X-Source-Name: dsh-supabase
+          X-Source-Version: '1.0.0'
+        failOnStartupError: false
