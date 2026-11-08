@@ -713,7 +713,12 @@ function apply(ctx, config) {
 						code: "SUPABASE_GUARD_CONFIRMATION_UNAVAILABLE"
 					}
 				});
-				const confirm = async (reason, en, zh) => {
+				const toggleKeys = {
+					destructive: "confirmDestructiveSql",
+					costly: "confirmCostlyOperations",
+					project: "confirmProjectAffecting"
+				};
+				const confirm = async (category, reason, en, zh) => {
 					if (canAsk) return askDecision(reason, en, zh);
 					const userQuestions = ctx.get("userQuestions");
 					if (userQuestions !== undefined && exec.agent !== undefined) {
@@ -725,6 +730,7 @@ function apply(ctx, config) {
 									header: "Confirm",
 									options: [
 										{ label: "Yes, proceed", description: "Run this Supabase operation now." },
+										{ label: "Yes, and stop asking for this", description: "Run it and switch this kind of confirmation off in the plugin settings." },
 										{ label: "No, cancel", description: "Do not run it." }
 									]
 								}],
@@ -732,8 +738,18 @@ function apply(ctx, config) {
 								signal: exec.signal
 							});
 							const item = (answer?.answers ?? []).find((entry) => entry.id === "supabase-guard");
-							const approved = (item?.selected ?? []).some((label) => String(label).startsWith("Yes"));
-							if (approved) return next();
+							const chosen = (item?.selected ?? [])[0];
+							if (typeof chosen === "string" && chosen.startsWith("Yes")) {
+								if (chosen.includes("stop asking")) {
+									// Immediate in-session effect plus a persisted setting.
+									const key = toggleKeys[category];
+									if (key !== undefined) {
+										toggles[key] = false;
+										void setGuardToggles(ctx, { [key]: false }).catch(() => {});
+									}
+								}
+								return next();
+							}
 							return {
 								kind: "deny",
 								reason: `The user did not approve ${exec.name} (${reason}). The tool body was not executed.`,
@@ -752,6 +768,7 @@ function apply(ctx, config) {
 					const match = destructiveMatch(sql);
 					if (match !== undefined) {
 						return await confirm(
+							"destructive",
 							`${exec.name} contains destructive SQL (${match.what})`,
 							`${exec.name} contains destructive SQL (${match.what}). Confirm to run it against the database.`,
 							`${exec.name} 包含破坏性 SQL（${match.what}）。确认后才会对数据库执行。`
@@ -762,6 +779,7 @@ function apply(ctx, config) {
 				if (CONFIRM_CATEGORIES.costly.includes(tool)) {
 					if (!toggles.confirmCostlyOperations) return next();
 					return await confirm(
+						"costly",
 						`${exec.name} creates billable Supabase resources`,
 						`${exec.name} creates billable Supabase resources. Confirm to proceed (charges may apply).`,
 						`${exec.name} 会创建计费的 Supabase 资源。确认后才会继续（可能产生费用）。`
@@ -770,6 +788,7 @@ function apply(ctx, config) {
 				if (CONFIRM_CATEGORIES.projectAffecting.includes(tool)) {
 					if (!toggles.confirmProjectAffecting) return next();
 					return await confirm(
+						"project",
 						`${exec.name} changes or affects an existing Supabase project`,
 						`${exec.name} changes or affects an existing Supabase project (deploys, branch operations, pauses, or deletions). Confirm to proceed.`,
 						`${exec.name} 会更改或影响现有 Supabase 项目（部署、分支操作、暂停或删除）。确认后才会继续。`
@@ -842,6 +861,12 @@ function apply(ctx, config) {
 						const destructive = parse("destructive");
 						const costly = parse("costly");
 						const project = parse("project");
+						const all = parse("all");
+						if (all !== undefined) {
+							updates.confirmDestructiveSql = all;
+							updates.confirmCostlyOperations = all;
+							updates.confirmProjectAffecting = all;
+						}
 						if (destructive !== undefined) updates.confirmDestructiveSql = destructive;
 						if (costly !== undefined) updates.confirmCostlyOperations = costly;
 						if (project !== undefined) updates.confirmProjectAffecting = project;

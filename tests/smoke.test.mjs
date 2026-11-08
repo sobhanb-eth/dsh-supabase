@@ -386,6 +386,22 @@ assert.ok((await guardNoConfirm.text()).includes("Confirm guardrail change"), "g
 const guardOk = await guardRoute.resource(new Request("http://127.0.0.1:63928/supabase/guard?confirm=1&destructive=off"));
 assert.ok((await guardOk.text()).includes("saved"), "guard route saves the toggle");
 assert.equal(recorded.edited.at(-1).config.confirmDestructiveSql, false, "destructive confirmations switched off");
+const guardAll = await guardRoute.resource(new Request("http://127.0.0.1:63928/supabase/guard?confirm=1&all=off"));
+assert.equal(recorded.edited.at(-1).config.confirmProjectAffecting, false, "all=off switches every category");
+
+// The confirmation dialog carries the switch itself: "stop asking" proceeds
+// and turns that kind of confirmation off for good, no commands needed.
+const questionsBefore = recorded.questions.length;
+recorded.approvalPolicy = "never";
+recorded.nextAnswer = { answers: [{ id: "supabase-guard", selected: ["Yes, and stop asking for this"] }] };
+const stopAsking = await call("mcp__supabase__execute_sql", { query: "drop table users" });
+assert.equal(stopAsking.kind, "allow", "stop-asking proceeds with the call");
+await new Promise((resolve) => setTimeout(resolve, 10));
+assert.ok(recorded.edited.some((e) => e.config && e.config.confirmDestructiveSql === false), "and persists the switch off");
+const silentAfter = await call("mcp__supabase__execute_sql", { query: "drop table users" });
+assert.equal(silentAfter.kind, "allow", "the same category no longer asks");
+assert.equal(recorded.questions.length, questionsBefore + 1, "only the first call opened a dialog");
+recorded.approvalPolicy = undefined;
 
 // Disconnect is terminal: run it last, after every test that needs the grant.
 const disconnectRoute = recorded.routes.find((r) => r.path === "/supabase/auth/disconnect");
@@ -463,7 +479,7 @@ factoryResult.apply({
 	remote: { credentials: { describe: async () => ({}), set: async () => {}, unset: async () => {} } }
 });
 
-assert.deepEqual(clientCaptures.slotsInject, ["settings.section"], "client registers a settings page slot");
+assert.deepEqual(clientCaptures.slotsInject, ["settings.section", "conversation.composer.dock"], "expected slots registered");
 const seat = clientCaptures.slotsRegister[0];
 assert.equal(seat.options.id, "supabase", "settings page id");
 assert.equal(seat.options.label(), "t:nav", "localized nav label");
@@ -606,6 +622,18 @@ const guardBtn = findElem(statusPage, (n) => n.type === "button" && n.children?.
 assert.ok(guardBtn, "guardrail toggle present");
 await guardBtn.props.onClick();
 assert.ok(guardCalls.some((u) => u.includes("guard?confirm=1") && u.includes("destructive=off")), "toggle sends the confirmed change");
+
+// The in-session composer pill switches every guardrail without commands.
+const pill = clientCaptures.slotsRegister.find((r) => r.options.id === "supabase-guard");
+assert.ok(pill, "composer dock pill registered");
+assert.deepEqual(clientCaptures.slotsInject, ["settings.section", "conversation.composer.dock"], "settings page and dock pill both register");
+hookIndex = 0;
+const pillTree = pill.component();
+assert.ok(JSON.stringify(pillTree).includes("t:guardPillLabel"), "pill renders in the session UI");
+const pillButton = findElem(pillTree, (n) => n.type === "button" && n.children?.[0] === "t:guardOn");
+assert.ok(pillButton, "pill toggle present while guards are on");
+await pillButton.props.onClick();
+assert.ok(guardCalls.some((u) => u.includes("all=off")), "pill switches all guardrails off");
 
 // Disconnect sends the confirmed sign-out and reports it.
 const disconnectBtn = findElem(statusPage, (n) => n.type === "button" && n.children?.[0] === "t:disconnectLabel");
