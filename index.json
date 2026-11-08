@@ -1,0 +1,58 @@
+{
+  "format": 1,
+  "title": {
+    "en": "dsh-supabase plugins",
+    "zh": "dsh-supabase 插件源"
+  },
+  "description": {
+    "en": "The Supabase plugin for DeepSeek Harness, published from github.com/sobhanb-eth/dsh-supabase.",
+    "zh": "来自 github.com/sobhanb-eth/dsh-supabase 的 DeepSeek Harness Supabase 插件。"
+  },
+  "metadata": {
+    "categories": {
+      "integrations": {
+        "title": {
+          "en": "Integrations",
+          "zh": "集成"
+        }
+      }
+    }
+  },
+  "plugins": [
+    {
+      "name": "dsh-supabase",
+      "title": {
+        "en": "Supabase",
+        "zh": "Supabase"
+      },
+      "description": {
+        "en": "Connect agents to Supabase projects with MCP tools, the official Supabase and Postgres agent skills, browser or token sign-in, and safety guardrails for destructive SQL and chargeable operations.",
+        "zh": "通过 MCP 工具、官方 Supabase 与 Postgres 智能体技能、浏览器或令牌登录，以及针对破坏性 SQL 与计费操作的安全护栏，把智能体连接到 Supabase 项目。"
+      },
+      "icon": "https://raw.githubusercontent.com/sobhanb-eth/dsh-supabase/main/icon.svg",
+      "author": "sobhanb-eth",
+      "homepage": "https://github.com/sobhanb-eth/dsh-supabase",
+      "repository": {
+        "url": "https://github.com/sobhanb-eth/dsh-supabase"
+      },
+      "metadata": {
+        "category": "integrations",
+        "keywords": ["supabase", "postgres", "mcp", "skills", "database", "oauth"]
+      },
+      "versions": [
+        {
+          "version": "1.0.0",
+          "publishTimestamp": 1794141859,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/sobhanb-eth/dsh-supabase",
+            "commit": "8f43a217b3d5cda10bcb95d905d20be421e9dbcd"
+          },
+          "engines": {
+            "dsh": ">=0.2.2-rc.1"
+          }
+        }
+      ]
+    }
+  ]
+}
