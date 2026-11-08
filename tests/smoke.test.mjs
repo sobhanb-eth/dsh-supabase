@@ -72,9 +72,15 @@ function makeCtx() {
 			}
 			if (name === "configEditor") {
 				return {
-					entries: () => [{ id: "supabase-mcp" }],
-					edit: async (_entry, change) => {
-						recorded.edited.push(change({ toolCallTimeoutMs: 60000 }));
+					// The installed row id is profile-chosen; lookup must go through
+					// the row's effective configuration.
+					entries: () => [{ id: "some-other-row" }],
+					configuration: () => [
+						{ entry: { id: "unity-row" }, inherited: {}, override: { serverName: "unity" } },
+						{ entry: { id: "mcp-row-42" }, inherited: {}, override: { serverName: "supabase", toolCallTimeoutMs: 60000 } }
+					],
+					edit: async (entry, change) => {
+						recorded.edited.push({ entryId: entry.id, config: change({ toolCallTimeoutMs: 60000 }) });
 					}
 				};
 			}
@@ -96,6 +102,8 @@ function makeCtx() {
 // Stub the OAuth world: MCP probe, metadata discovery, DCR, token endpoint.
 const realFetch = globalThis.fetch;
 const oauthCalls = [];
+const tokenBodies = [];
+let tokenFailBody;
 let tokenResponse = { access_token: "at-123", refresh_token: "rt-123", expires_in: 3600 };
 globalThis.fetch = async (url, options = {}) => {
 	const target = String(url);
@@ -117,9 +125,16 @@ globalThis.fetch = async (url, options = {}) => {
 		});
 	}
 	if (target === "https://auth.example/register" && (options.method ?? "GET") === "POST") {
-		return Response.json({ client_id: "test-client" });
+		return Response.json({ client_id: "test-client", client_secret: "s3cret", token_endpoint_auth_method: "client_secret_post" });
 	}
 	if (target === "https://auth.example/token" && (options.method ?? "GET") === "POST") {
+		tokenBodies.push(String(options.body ?? ""));
+		if (tokenFailBody !== undefined) {
+			return new Response(JSON.stringify({ error: "invalid_request", message: tokenFailBody }), {
+				status: 422,
+				headers: { "content-type": "application/json" }
+			});
+		}
 		return Response.json(tokenResponse);
 	}
 	return new Response("not found", { status: 404 });
@@ -189,7 +204,9 @@ assert.deepEqual(recorded.sets, [{ key: "SUPABASE_ACCESS_TOKEN", value: "at-123"
 assert.equal(process.env.SUPABASE_ACCESS_TOKEN, "at-123", "env bridge carries the token to the MCP row");
 const grant = recorded.records.find((r) => r.key === "dsh-supabase/oauth");
 assert.equal(grant.payload.refresh_token, "rt-123", "refresh token stored as a grant record");
-assert.ok(recorded.edited.length >= 1, "connection reload nudged after sign-in");
+assert.equal(grant.payload.client_secret, "s3cret", "client secret kept in the grant for refreshes");
+assert.ok(tokenBodies.length > 0 && tokenBodies[0].includes("client_secret=s3cret"), "token exchange presents the registered client secret");
+assert.ok(recorded.edited.some((e) => e.entryId === "mcp-row-42"), "connection reload finds the row by configuration");
 
 // Callback errors surface as friendly pages, never as crashes.
 const badState = await callbackRoute.resource(new Request("http://127.0.0.1:63928/supabase/auth/callback?code=abc&state=nope"));
@@ -197,6 +214,14 @@ assert.equal(badState.status, 200);
 assert.ok((await badState.text()).includes("expired"), "unknown state gets a friendly page");
 const declined = await callbackRoute.resource(new Request("http://127.0.0.1:63928/supabase/auth/callback?error=access_denied"));
 assert.ok((await declined.text()).includes("cancelled"), "declined sign-in gets a friendly page");
+
+// A failing token exchange echoes the server's own error body to the user.
+tokenFailBody = "client_secret required";
+const start2 = await startRoute.resource(new Request("http://127.0.0.1:63928/supabase/auth/start"));
+const state2 = new URL(start2.headers.get("location")).searchParams.get("state");
+const failed = await callbackRoute.resource(new Request(`http://127.0.0.1:63928/supabase/auth/callback?code=abc&state=${state2}`));
+assert.ok((await failed.text()).includes("client_secret required"), "server error body is echoed on failure");
+tokenFailBody = undefined;
 
 // Commands: four registered with distinct plugin-namespaced identities.
 assert.deepEqual(recorded.commands.map((c) => c.name), ["supabase", "supabase-auth", "supabase-connect", "supabase-review"]);
@@ -212,6 +237,7 @@ assert.ok(auth.text.includes("/supabase/auth/start"), "auth command returns the 
 const connect = await recorded.commands[2].handler({});
 assert.equal(connect.kind, "success");
 assert.ok(connect.text.includes("reloaded"), "connect command reloads the MCP row");
+assert.deepEqual(recorded.edited.at(-1), { entryId: "mcp-row-42", config: { toolCallTimeoutMs: 60001 } }, "reconnect nudges the matched MCP row");
 const review = await recorded.commands[3].handler({});
 assert.ok(review.text.includes("RLS is enabled"), "review checklist output");
 

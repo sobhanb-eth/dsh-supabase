@@ -222,7 +222,7 @@ async function discoverOAuth(mcpUrl, fetchFn) {
 async function registerClient(metadata, redirectUri, fetchFn) {
 	const cached = registeredClients.get(metadata.tokenEndpoint);
 	if (cached !== undefined) return cached;
-	let clientId = "dsh-supabase";
+	let registration = { clientId: "dsh-supabase", clientSecret: undefined, method: "none" };
 	if (metadata.registrationEndpoint !== undefined) {
 		const response = await fetchFn(metadata.registrationEndpoint, {
 			method: "POST",
@@ -236,19 +236,27 @@ async function registerClient(metadata, redirectUri, fetchFn) {
 			}),
 			signal: AbortSignal.timeout(10_000)
 		});
-		if (response.ok) {
-			const body = await response.json();
-			if (typeof body.client_id === "string") clientId = body.client_id;
-		}
+		const text = await response.text();
+		if (!response.ok) throw new Error(`client registration failed (${response.status}): ${text.slice(0, 300)}`);
+		const body = JSON.parse(text);
+		if (typeof body.client_id !== "string") throw new Error(`client registration returned no client_id: ${text.slice(0, 300)}`);
+		registration = {
+			clientId: body.client_id,
+			// Some authorization servers issue a secret even for public clients
+			// and then require it at the token endpoint. Keep it and present it.
+			clientSecret: typeof body.client_secret === "string" && body.client_secret !== "" ? body.client_secret : undefined,
+			method: typeof body.token_endpoint_auth_method === "string" ? body.token_endpoint_auth_method
+				: (typeof body.client_secret === "string" && body.client_secret !== "" ? "client_secret_post" : "none")
+		};
 	}
-	registeredClients.set(metadata.tokenEndpoint, clientId);
-	return clientId;
+	registeredClients.set(metadata.tokenEndpoint, registration);
+	return registration;
 }
 
 /** Build the authorize URL and remember the PKCE verifier for the callback. */
 async function buildAuthorizeUrl(redirectUri, fetchFn, mcpUrl) {
 	const metadata = await discoverOAuth(mcpUrl, fetchFn);
-	const clientId = await registerClient(metadata, redirectUri, fetchFn);
+	const registration = await registerClient(metadata, redirectUri, fetchFn);
 	const state = base64url(randomBytes(24));
 	const verifier = base64url(randomBytes(48));
 	const challenge = base64url(createHash("sha256").update(verifier).digest());
@@ -257,47 +265,63 @@ async function buildAuthorizeUrl(redirectUri, fetchFn, mcpUrl) {
 		if (Date.now() - entry.createdAt > 15 * 60 * 1000) pendingAuth.delete(key);
 	}
 	const url = new URL(metadata.authorizationEndpoint);
-	url.searchParams.set("client_id", clientId);
+	url.searchParams.set("client_id", registration.clientId);
 	url.searchParams.set("redirect_uri", redirectUri);
 	url.searchParams.set("response_type", "code");
 	url.searchParams.set("state", state);
 	url.searchParams.set("code_challenge", challenge);
 	url.searchParams.set("code_challenge_method", "S256");
-	return { url: url.toString(), state, metadata, clientId };
+	return { url: url.toString(), state, metadata, registration };
+}
+
+/** POST one token request with robust client authentication and body-capturing errors. */
+async function tokenRequest(metadata, registration, baseParams, fetchFn, what) {
+	const attempts = [{ secretInBody: registration.method !== "client_secret_basic" }];
+	if (registration.clientSecret) {
+		// Authorization servers that issue a secret sometimes misdeclare how to
+		// present it. Try the other presentations before giving up.
+		attempts.push({ secretInBody: true }, { secretInBody: false });
+	}
+	let lastError = `${what} failed`;
+	for (const attempt of attempts) {
+		const params = new URLSearchParams(baseParams);
+		const headers = { "content-type": "application/x-www-form-urlencoded" };
+		if (registration.clientSecret) {
+			if (attempt.secretInBody) params.set("client_secret", registration.clientSecret);
+			else headers.authorization = `Basic ${Buffer.from(`${registration.clientId}:${registration.clientSecret}`).toString("base64")}`;
+		}
+		const response = await fetchFn(metadata.tokenEndpoint, {
+			method: "POST",
+			headers,
+			body: params.toString(),
+			signal: AbortSignal.timeout(15_000)
+		});
+		const text = await response.text();
+		if (response.ok) return JSON.parse(text);
+		lastError = `${what} failed (${response.status}): ${text.slice(0, 300)}`;
+		if (response.status !== 401 && response.status !== 422) break;
+	}
+	throw new Error(lastError);
 }
 
 /** Exchange an authorization code for tokens. */
-async function exchangeCode(metadata, clientId, pending, code, fetchFn) {
-	const response = await fetchFn(metadata.tokenEndpoint, {
-		method: "POST",
-		headers: { "content-type": "application/x-www-form-urlencoded" },
-		body: new URLSearchParams({
-			grant_type: "authorization_code",
-			code,
-			redirect_uri: pending.redirectUri,
-			client_id: clientId,
-			code_verifier: pending.verifier
-		}).toString(),
-		signal: AbortSignal.timeout(15_000)
-	});
-	if (!response.ok) throw new Error(`token exchange failed (${response.status})`);
-	return response.json();
+async function exchangeCode(metadata, registration, pending, code, fetchFn) {
+	return tokenRequest(metadata, registration, {
+		grant_type: "authorization_code",
+		code,
+		redirect_uri: pending.redirectUri,
+		client_id: registration.clientId,
+		code_verifier: pending.verifier
+	}, fetchFn, "token exchange");
 }
 
 /** Refresh an expired access token. */
-async function refreshTokens(metadata, clientId, refreshToken, fetchFn) {
-	const response = await fetchFn(metadata.tokenEndpoint, {
-		method: "POST",
-		headers: { "content-type": "application/x-www-form-urlencoded" },
-		body: new URLSearchParams({
-			grant_type: "refresh_token",
-			refresh_token: refreshToken,
-			client_id: clientId
-		}).toString(),
-		signal: AbortSignal.timeout(15_000)
-	});
-	if (!response.ok) throw new Error(`token refresh failed (${response.status})`);
-	return response.json();
+async function refreshTokens(metadata, registration, refreshToken, fetchFn) {
+	return tokenRequest(metadata, registration, {
+		grant_type: "refresh_token",
+		refresh_token: refreshToken,
+		client_id: registration.clientId
+	}, fetchFn, "token refresh");
 }
 
 /** Minimal, self-contained result page for the browser tab. */
@@ -322,7 +346,19 @@ async function reconnect(ctx) {
 	const editor = ctx.get("configEditor");
 	if (editor === undefined) return "Automatic reconnect is unavailable in this profile. Reload the profile or restart DSH to apply credential changes.";
 	try {
-		const entry = editor.entries().find((candidate) => candidate.id === MCP_ROW_ID);
+		// The installed row's id is chosen by the profile; find it by the
+		// connection's own configuration, then by the known ids as fallbacks.
+		let entry;
+		if (typeof editor.configuration === "function") {
+			for (const row of editor.configuration()) {
+				const effective = { ...(row.inherited ?? {}), ...(row.override ?? {}) };
+				if (effective.serverName === "supabase") {
+					entry = row.entry;
+					break;
+				}
+			}
+		}
+		if (entry === undefined) entry = editor.entries().find((candidate) => candidate.id === MCP_ROW_ID);
 		if (entry === undefined) return "The supabase-mcp connection row is not present in this profile; reinstall the dsh-supabase bundle.";
 		// Editing an ordinary config field restarts the row and re-evaluates its
 		// Loader expressions. The toolCallTimeoutMs value keeps its documented
@@ -359,7 +395,7 @@ async function commitGrant(ctx, payload) {
 }
 
 /** Schedule a proactive token refresh before the access token expires. */
-function scheduleRefresh(ctx, expiresIn, metadata, clientId, fetchFn, log) {
+function scheduleRefresh(ctx, expiresIn, metadata, registration, fetchFn, log) {
 	if (refreshTimer !== undefined) clearTimeout(refreshTimer);
 	if (typeof expiresIn !== "number" || expiresIn <= 0) return;
 	const delay = Math.max(30_000, expiresIn * 1000 * 0.75);
@@ -368,18 +404,26 @@ function scheduleRefresh(ctx, expiresIn, metadata, clientId, fetchFn, log) {
 			try {
 				const credentials = ctx.get("credentials");
 				const record = await credentials?.readRecord(OAUTH_RECORD);
-				const refreshToken = record?.payload?.refresh_token;
+				const payload = record?.payload ?? {};
+				const refreshToken = payload.refresh_token;
 				if (typeof refreshToken !== "string") return;
-				const tokens = await refreshTokens(metadata, clientId, refreshToken, fetchFn);
+				const effective = {
+					clientId: payload.client_id ?? registration.clientId,
+					clientSecret: payload.client_secret ?? registration.clientSecret,
+					method: payload.token_auth_method ?? registration.method
+				};
+				const tokens = await refreshTokens(metadata, effective, refreshToken, fetchFn);
 				if (typeof tokens.access_token === "string") {
 					await commitGrant(ctx, {
 						refresh_token: typeof tokens.refresh_token === "string" ? tokens.refresh_token : refreshToken,
 						token_url: metadata.tokenEndpoint,
-						client_id: clientId,
+						client_id: effective.clientId,
+						client_secret: effective.clientSecret,
+						token_auth_method: effective.method,
 						expires_at: Date.now() + (tokens.expires_in ?? 3600) * 1000
 					});
 					await commitAccessToken(ctx, tokens.access_token);
-					scheduleRefresh(ctx, tokens.expires_in, metadata, clientId, fetchFn, log);
+					scheduleRefresh(ctx, tokens.expires_in, metadata, effective, fetchFn, log);
 				}
 			} catch (error) {
 				log(`Supabase token refresh failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -582,17 +626,19 @@ function apply(ctx, config) {
 							const code = params.get("code");
 							if (code === null) return resultPage("Sign-in could not finish", "No authorization code arrived. Start again from Settings.");
 							const metadata = await discoverOAuth(mcpUrl(), fetchFn);
-							const clientId = await registerClient(metadata, pending.redirectUri, fetchFn);
-							const tokens = await exchangeCode(metadata, clientId, pending, code, fetchFn);
+							const registration = await registerClient(metadata, pending.redirectUri, fetchFn);
+							const tokens = await exchangeCode(metadata, registration, pending, code, fetchFn);
 							if (typeof tokens.access_token !== "string") throw new Error("the token response carried no access token");
 							await commitGrant(ctx, {
 								refresh_token: typeof tokens.refresh_token === "string" ? tokens.refresh_token : "",
 								token_url: metadata.tokenEndpoint,
-								client_id: clientId,
+								client_id: registration.clientId,
+								client_secret: registration.clientSecret,
+								token_auth_method: registration.method,
 								expires_at: Date.now() + (tokens.expires_in ?? 3600) * 1000
 							});
 							await commitAccessToken(ctx, tokens.access_token);
-							scheduleRefresh(ctx, tokens.expires_in, metadata, clientId, fetchFn, log);
+							scheduleRefresh(ctx, tokens.expires_in, metadata, registration, fetchFn, log);
 							return resultPage("Supabase connected", "You are signed in with your Supabase account. The organization you chose during sign-in decides which projects this session can reach. Close this tab and return to DeepSeek Harness.");
 						} catch (error) {
 							return resultPage("Sign-in could not finish", `The token exchange failed: ${error instanceof Error ? error.message : String(error)}. You can paste a personal access token in Settings instead.`);
@@ -725,21 +771,28 @@ function apply(ctx, config) {
 						if (hit?.value && !process.env[TOKEN_KEY]) process.env[TOKEN_KEY] = hit.value;
 						const record = await credentials.readRecord(OAUTH_RECORD);
 						const payload = record?.payload ?? {};
+						const registration = {
+							clientId: payload.client_id ?? "dsh-supabase",
+							clientSecret: payload.client_secret,
+							method: payload.token_auth_method ?? (payload.client_secret ? "client_secret_post" : "none")
+						};
 						if (payload.refresh_token && payload.token_url && Date.now() > (payload.expires_at ?? 0) - 5 * 60 * 1000) {
 							const metadata = { tokenEndpoint: payload.token_url, authorizationEndpoint: "", registrationEndpoint: undefined };
-							const tokens = await refreshTokens(metadata, payload.client_id ?? "dsh-supabase", payload.refresh_token, fetchFn);
+							const tokens = await refreshTokens(metadata, registration, payload.refresh_token, fetchFn);
 							if (typeof tokens.access_token === "string") {
 								await commitGrant(ctx, {
 									refresh_token: typeof tokens.refresh_token === "string" ? tokens.refresh_token : payload.refresh_token,
 									token_url: payload.token_url,
-									client_id: payload.client_id,
+									client_id: registration.clientId,
+									client_secret: registration.clientSecret,
+									token_auth_method: registration.method,
 									expires_at: Date.now() + (tokens.expires_in ?? 3600) * 1000
 								});
 								await commitAccessToken(ctx, tokens.access_token);
-								scheduleRefresh(ctx, tokens.expires_in, metadata, payload.client_id ?? "dsh-supabase", fetchFn, log);
+								scheduleRefresh(ctx, tokens.expires_in, metadata, registration, fetchFn, log);
 							}
 						} else if (payload.refresh_token) {
-							scheduleRefresh(ctx, Math.max(0, ((payload.expires_at ?? 0) - Date.now()) / 1000), { tokenEndpoint: payload.token_url ?? "", authorizationEndpoint: "", registrationEndpoint: undefined }, payload.client_id ?? "dsh-supabase", fetchFn, log);
+							scheduleRefresh(ctx, Math.max(0, ((payload.expires_at ?? 0) - Date.now()) / 1000), { tokenEndpoint: payload.token_url ?? "", authorizationEndpoint: "", registrationEndpoint: undefined }, registration, fetchFn, log);
 						}
 					} catch (error) {
 						log(`startup token hydration failed: ${error instanceof Error ? error.message : String(error)}`);
