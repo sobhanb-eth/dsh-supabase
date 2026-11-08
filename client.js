@@ -30,7 +30,10 @@ window.__ModuleLoader__.load({
 				signInTitle: 'Connect Supabase account (recommended)',
 				signInBody: 'Sign in with your Supabase account in the browser. You pick the organization during sign-in, so the projects that organization owns are what this session can reach. Tokens refresh automatically.',
 				signInButton: 'Open Supabase sign-in',
-				signInNote: 'Opens supabase.com in a new tab and returns here automatically.',
+				signInNote: 'Opens supabase.com in a new tab and returns here automatically. If no tab opens in your shell, use the copy button and open the link in your browser.',
+				copyLink: 'Copy sign-in link',
+				copied: 'Copied. Paste it into your browser.',
+				signInNoUrl: 'The sign-in link is not available yet. Run /supabase-auth in any session and open the link it prints.',
 				tokenTitle: 'Use a personal access token',
 				tokenBody: 'Best for CI, headless setups, or when browser sign-in is not available. Create a scoped token that is limited to the projects and permissions the task needs.',
 				tokenLabel: 'Personal access token',
@@ -78,7 +81,10 @@ window.__ModuleLoader__.load({
 				signInTitle: '连接 Supabase 账号（推荐）',
 				signInBody: '在浏览器中登录 Supabase 账号。登录时选择组织，本会话即可访问该组织拥有的项目。令牌会自动续期。',
 				signInButton: '打开 Supabase 登录',
-				signInNote: '将在新标签页打开 supabase.com，并自动返回。',
+				signInNote: '将在新标签页打开 supabase.com，并自动返回。如果你的宿主没有打开标签页，请使用复制按钮，在浏览器中打开链接。',
+				copyLink: '复制登录链接',
+				copied: '已复制，请粘贴到浏览器中打开。',
+				signInNoUrl: '登录链接暂不可用。请在任意会话中运行 /supabase-auth，并打开它输出的链接。',
 				tokenTitle: '使用个人访问令牌',
 				tokenBody: '适合 CI、无界面环境，或无法使用浏览器登录的场景。请创建仅限所需项目与权限的作用域令牌。',
 				tokenLabel: '个人访问令牌',
@@ -177,11 +183,14 @@ window.__ModuleLoader__.load({
 
 				function authStartUrl() {
 					try {
-						const origin = (typeof window !== 'undefined' && window.location && window.location.origin) ? window.location.origin : '';
-						return origin + '/supabase/auth/start';
-					} catch {
-						return '/supabase/auth/start';
-					}
+						const injected = (typeof globalThis !== 'undefined' && globalThis.__DSH_SUPABASE__) || (typeof window !== 'undefined' && window.__DSH_SUPABASE__);
+						if (injected && typeof injected.authStartUrl === 'string' && injected.authStartUrl.indexOf('http') === 0) return injected.authStartUrl;
+					} catch { /* fall through */ }
+					try {
+						const origin = (typeof window !== 'undefined' && window.location && typeof window.location.origin === 'string') ? window.location.origin : '';
+						if (origin.indexOf('http') === 0) return origin + '/supabase/auth/start';
+					} catch { /* fall through */ }
+					return '';
 				}
 
 				function ErrorCard(props) {
@@ -219,6 +228,8 @@ window.__ModuleLoader__.load({
 					const [busy, setBusy] = React.useState(false);
 					const [status, setStatus] = React.useState('');
 					const [configured, setConfigured] = React.useState(null);
+					const [showLink, setShowLink] = React.useState(false);
+					const [copied, setCopied] = React.useState(false);
 
 					const refresh = React.useCallback(() => {
 						const remote = credentialsRemote();
@@ -283,6 +294,26 @@ window.__ModuleLoader__.load({
 					};
 
 					const endpoint = 'https://mcp.supabase.com/mcp';
+					const signInUrl = authStartUrl();
+					const openSignIn = () => {
+						setShowLink(true);
+						if (!signInUrl) return;
+						try {
+							const opened = window.open(signInUrl, '_blank', 'noopener');
+							if (opened && typeof opened === 'object' && 'opener' in opened) opened.opener = null;
+						} catch { /* the copyable link below covers shells that block opens */ }
+					};
+					const copySignInLink = () => {
+						if (!signInUrl) return;
+						const done = () => setCopied(true);
+						try {
+							if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+								Promise.resolve(navigator.clipboard.writeText(signInUrl)).then(done, done);
+							} else {
+								done();
+							}
+						} catch { done(); }
+					};
 					const stateColor = configured === true ? 'var(--dsw-alias-state-success-primary)' : configured === false ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-state-idle-primary)';
 
 					return h('div', { className: 'dsh-supabase-page' },
@@ -309,9 +340,14 @@ window.__ModuleLoader__.load({
 							h('h3', { className: 'dsh-supabase-title' }, t('signInTitle')),
 							h('p', { className: 'dsh-supabase-sub' }, t('authIntro')),
 							h('p', { className: 'dsh-supabase-sub' }, t('signInBody')),
-							h('div', { className: 'dsh-supabase-actions' },
-								h('a', { className: 'dsh-supabase-btn dsh-supabase-btn-primary', href: authStartUrl(), target: '_blank', rel: 'noreferrer' }, t('signInButton'))
-							),
+							signInUrl ? h('div', { className: 'dsh-supabase-actions' },
+								h('button', { className: 'dsh-supabase-btn dsh-supabase-btn-primary', type: 'button', onClick: openSignIn }, t('signInButton')),
+								h('button', { className: 'dsh-supabase-btn dsh-supabase-btn-ghost', type: 'button', onClick: copySignInLink }, t('copyLink'))
+							) : h('p', { className: 'dsh-supabase-note' }, t('signInNoUrl')),
+							showLink && signInUrl ? h('div', { className: 'dsh-supabase-row' },
+								h('a', { className: 'dsh-supabase-link', href: signInUrl, target: '_blank', rel: 'noreferrer' }, signInUrl)
+							) : null,
+							copied ? h('p', { className: 'dsh-supabase-status', 'aria-live': 'polite' }, t('copied')) : null,
 							h('p', { className: 'dsh-supabase-note' }, t('signInNote'))
 						),
 						h('div', { className: 'dsh-supabase-card' },

@@ -528,6 +528,14 @@ function apply(ctx, config) {
 		try {
 			const webServer = ctx.get("webServer");
 			if (webServer === undefined) throw new Error("webServer service unavailable in this profile");
+			// Publish the real sign-in URL into the page boot data. Shells that
+			// do not serve the UI over http (window.location.origin is unusable
+			// there) still receive it through the index injection table.
+			yield ctx.on("webserver/index-inject", (table) => {
+				const origin = safeOrigin(ctx);
+				if (origin === undefined) return;
+				table.push({ kind: "global", name: "__DSH_SUPABASE__", value: { authStartUrl: `${origin}${AUTH_START_PATH}` } });
+			});
 			yield webServer.register({
 				kind: "exact",
 				path: AUTH_START_PATH,

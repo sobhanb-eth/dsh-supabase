@@ -252,6 +252,15 @@ watch("SUPABASE_ACCESS_TOKEN");
 await new Promise((resolve) => setTimeout(resolve, 10));
 assert.equal(recorded.edited.length, editsBefore + 1, "token change reloads the MCP row");
 
+// Index injection publishes the real sign-in URL to every shell.
+const injectHandler = recorded.listeners.find((l) => l.name === "webserver/index-inject").handler;
+const injectTable = [];
+injectHandler(injectTable);
+assert.equal(injectTable.length, 1, "one index injection row");
+assert.equal(injectTable[0].kind, "global", "global boot row");
+assert.equal(injectTable[0].name, "__DSH_SUPABASE__");
+assert.equal(injectTable[0].value.authStartUrl, "http://127.0.0.1:63928/supabase/auth/start", "Host origin carried to the page");
+
 globalThis.fetch = realFetch;
 delete process.env.SUPABASE_ACCESS_TOKEN;
 console.log("host E2E: PASS (skills, prompt, guardrail, commands, tool, credential watch, OAuth flow)");
@@ -276,10 +285,16 @@ class FakeComponent {
 		this.props = props;
 	}
 }
+const hookState = [];
+let hookIndex = 0;
 const fakeReact = {
 	Component: FakeComponent,
 	createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
-	useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
+	useState: (initial) => {
+		const i = hookIndex++;
+		if (!(i in hookState)) hookState[i] = typeof initial === "function" ? initial() : initial;
+		return [hookState[i], (value) => { hookState[i] = typeof value === "function" ? value(hookState[i]) : value; }];
+	},
 	useCallback: (fn) => fn,
 	useEffect: () => {}
 };
@@ -323,11 +338,68 @@ if (typeof tree.type === "function" && tree.type !== FakeComponent) {
 } else {
 	body = tree.children ? tree.children[0] : tree;
 }
-const page = typeof body.type === "function" ? body.type() : body;
+const renderPage = () => {
+	hookIndex = 0;
+	return typeof body.type === "function" ? body.type() : body;
+};
+const findElem = (node, pred) => {
+	if (!node || typeof node !== "object") return undefined;
+	if (pred(node)) return node;
+	for (const child of node.children ?? []) {
+		const hit = findElem(child, pred);
+		if (hit) return hit;
+	}
+	return undefined;
+};
+
+// Desktop-like shell: no usable page origin, so the guidance fallback shows.
+window.location = { origin: "null" };
+const page = renderPage();
 assert.equal(page.type, "div", "settings page renders a root div");
 const flat = JSON.stringify(page);
-assert.ok(flat.includes("supabase/auth/start"), "OAuth sign-in link present");
 assert.ok(flat.includes("tokenPlaceholder"), "PAT form present");
+assert.ok(flat.includes("t:signInNoUrl"), "guidance shown when no URL is known");
+
+// With an http page origin the sign-in and copy actions appear.
+window.location = { origin: "http://127.0.0.1:63928" };
+const page2 = renderPage();
+const flat2 = JSON.stringify(page2);
+assert.ok(flat2.includes("t:signInButton"), "sign-in button present");
+assert.ok(flat2.includes("t:copyLink"), "copy-link action present");
+assert.ok(!flat2.includes("t:signInNoUrl"), "guidance hidden when a URL is known");
+
+// Clicking the button attempts a browser open and reveals the copyable link
+// even when the shell swallows the open (window.open returning null).
+const opened = [];
+window.open = (url) => {
+	opened.push(url);
+	return null;
+};
+const signInButton = findElem(page2, (n) => n.type === "button" && n.children?.[0] === "t:signInButton");
+assert.ok(signInButton, "sign-in button element found");
+signInButton.props.onClick();
+assert.deepEqual(opened, ["http://127.0.0.1:63928/supabase/auth/start"], "button opens the sign-in URL");
+const page3 = renderPage();
+assert.ok(JSON.stringify(page3).includes("http://127.0.0.1:63928/supabase/auth/start"), "fallback link row revealed after the click");
+
+// The copy button reports success even without a clipboard API.
+const copyButton = findElem(page3, (n) => n.type === "button" && n.children?.[0] === "t:copyLink");
+assert.ok(copyButton, "copy button element found");
+copyButton.props.onClick();
+const page4 = renderPage();
+assert.ok(JSON.stringify(page4).includes("t:copied"), "copy feedback shown");
+
+// An injected Host URL wins over the page origin (Desktop shells).
+globalThis.__DSH_SUPABASE__ = { authStartUrl: "http://injected.example/supabase/auth/start" };
+window.location = { origin: "null" };
+const page5 = renderPage();
+const signInButton2 = findElem(page5, (n) => n.type === "button" && n.children?.[0] === "t:signInButton");
+assert.ok(signInButton2, "injected URL keeps the button available");
+opened.length = 0;
+signInButton2.props.onClick();
+assert.deepEqual(opened, ["http://injected.example/supabase/auth/start"], "injected Host URL is used");
+delete globalThis.__DSH_SUPABASE__;
+
 const { readFile } = await import("node:fs/promises");
 for (const file of ["../client.js", "../index.js", "../README.md"]) {
 	const source = await readFile(new URL(file, import.meta.url), "utf8");
