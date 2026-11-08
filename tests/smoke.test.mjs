@@ -479,7 +479,7 @@ factoryResult.apply({
 	remote: { credentials: { describe: async () => ({}), set: async () => {}, unset: async () => {} } }
 });
 
-assert.deepEqual(clientCaptures.slotsInject, ["settings.section", "conversation.composer.dock"], "expected slots registered");
+assert.deepEqual(clientCaptures.slotsInject, ["settings.section", "settings.section.icon", "conversation.composer.dock"], "expected slots registered");
 const seat = clientCaptures.slotsRegister[0];
 assert.equal(seat.options.id, "supabase", "settings page id");
 assert.equal(seat.options.label(), "t:nav", "localized nav label");
@@ -626,7 +626,11 @@ assert.ok(guardCalls.some((u) => u.includes("guard?confirm=1") && u.includes("de
 // The in-session composer pill switches every guardrail without commands.
 const pill = clientCaptures.slotsRegister.find((r) => r.options.id === "supabase-guard");
 assert.ok(pill, "composer dock pill registered");
-assert.deepEqual(clientCaptures.slotsInject, ["settings.section", "conversation.composer.dock"], "settings page and dock pill both register");
+assert.deepEqual(clientCaptures.slotsInject, ["settings.section", "settings.section.icon", "conversation.composer.dock"], "settings page, nav icon, and dock pill all register");
+const navIcon = clientCaptures.slotsRegister.find((r) => r.options.name === "settings.section.icon");
+assert.ok(navIcon, "settings nav icon registered");
+const iconTree = navIcon.component();
+assert.equal(iconTree.type, "svg", "nav icon renders a glyph");
 hookIndex = 0;
 const pillTree = pill.component();
 assert.ok(JSON.stringify(pillTree).includes("t:guardPillLabel"), "pill renders in the session UI");
