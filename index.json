@@ -5,8 +5,8 @@
     "zh": "dsh-supabase 插件源"
   },
   "description": {
-    "en": "The Supabase plugin for DeepSeek Harness, published from github.com/sobhanb-eth/dsh-supabase.",
-    "zh": "来自 github.com/sobhanb-eth/dsh-supabase 的 DeepSeek Harness Supabase 插件。"
+    "en": "The Supabase plugin for DeepSeek Harness, published from github.com/sobhanb-eth/dsh-supabase. The index lists the current release only.",
+    "zh": "来自 github.com/sobhanb-eth/dsh-supabase 的 DeepSeek Harness Supabase 插件。本索引仅列出当前版本。"
   },
   "metadata": {
     "categories": {
@@ -41,132 +41,12 @@
       },
       "versions": [
         {
-          "version": "1.0.10",
-          "publishTimestamp": 1794161078,
+          "version": "1.0.11",
+          "publishTimestamp": 1794163487,
           "source": {
             "type": "git",
             "url": "https://github.com/sobhanb-eth/dsh-supabase",
-            "commit": "d2b4a369699ceda4f8a41de4bba76a46a50e54d3"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.1"
-          }
-        },
-        {
-          "version": "1.0.9",
-          "publishTimestamp": 1794160907,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/sobhanb-eth/dsh-supabase",
-            "commit": "57ec339e8c27526e2cbbc36376989e0ecddec766"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.1"
-          }
-        },
-        {
-          "version": "1.0.8",
-          "publishTimestamp": 1794156639,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/sobhanb-eth/dsh-supabase",
-            "commit": "f3ca51a39406cf0aedb5b1f8582c13be223f948f"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.1"
-          }
-        },
-        {
-          "version": "1.0.7",
-          "publishTimestamp": 1794154933,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/sobhanb-eth/dsh-supabase",
-            "commit": "d8edfa2c61c0dde7dbcda8cbbe45b84429e96c57"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.1"
-          }
-        },
-        {
-          "version": "1.0.6",
-          "publishTimestamp": 1794153777,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/sobhanb-eth/dsh-supabase",
-            "commit": "1f94a90a4a06bfab8461b124fcdc9508ee8a5491"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.1"
-          }
-        },
-        {
-          "version": "1.0.5",
-          "publishTimestamp": 1794146342,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/sobhanb-eth/dsh-supabase",
-            "commit": "bdab1563b7638abc8e7c6672b689a3dc4554c7cb"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.1"
-          }
-        },
-        {
-          "version": "1.0.4",
-          "publishTimestamp": 1794145000,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/sobhanb-eth/dsh-supabase",
-            "commit": "7d92db7c6db4de40896b2398d600ec3655265e11"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.1"
-          }
-        },
-        {
-          "version": "1.0.3",
-          "publishTimestamp": 1794144406,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/sobhanb-eth/dsh-supabase",
-            "commit": "df4adb03ec0a8916edd7a3924d0d984ab2233ddf"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.1"
-          }
-        },
-        {
-          "version": "1.0.2",
-          "publishTimestamp": 1794143792,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/sobhanb-eth/dsh-supabase",
-            "commit": "7353c335186c6ca988aa45bc7eeb38d092918919"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.1"
-          }
-        },
-        {
-          "version": "1.0.1",
-          "publishTimestamp": 1794143079,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/sobhanb-eth/dsh-supabase",
-            "commit": "b051fa9f79ba6c955f8f2e9038372d5e7fb00109"
-          },
-          "engines": {
-            "dsh": ">=0.2.2-rc.1"
-          }
-        },
-        {
-          "version": "1.0.0",
-          "publishTimestamp": 1794141859,
-          "source": {
-            "type": "git",
-            "url": "https://github.com/sobhanb-eth/dsh-supabase",
-            "commit": "8f43a217b3d5cda10bcb95d905d20be421e9dbcd"
+            "commit": "ec105296d742a1670d23e95cc0b2a1bf78de0e86"
           },
           "engines": {
             "dsh": ">=0.2.2-rc.1"
