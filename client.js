@@ -24,6 +24,16 @@ window.__ModuleLoader__.load({
 				tokenStateLabel: 'Access token',
 				tokenConfigured: 'Configured',
 				tokenMissing: 'Not configured',
+				statusUnconfirmed: 'Unconfirmed',
+				statusUnconfirmedDetail: 'The status could not be read yet. It refreshes automatically; you can also press Refresh status.',
+				toolsLabel: 'MCP tools',
+				toolsReadyCount: 'ready (mcp__supabase__*)',
+				toolsWaiting: 'waiting for sign-in',
+				refreshLabel: 'Refresh status',
+				disconnectLabel: 'Disconnect and revoke access',
+				disconnectNote: 'Signs you out of Supabase, revokes the sign-in where the server allows it, and removes the stored tokens and the MCP tools from this profile.',
+				disconnectStarted: 'Sign-out started. The status above refreshes automatically.',
+				disconnectUnavailable: 'The sign-out link is not available. Run /supabase-disconnect in any session.',
 				endpointLabel: 'MCP endpoint',
 				endpointHelp: 'Set the SUPABASE_MCP_URL environment variable to scope to one project or to enable read-only mode, for example https://mcp.supabase.com/mcp?project_ref=<ref>&read_only=true.',
 				authIntro: 'Choose whichever sign-in works best for you. Both give the agent the same tools.',
@@ -75,6 +85,16 @@ window.__ModuleLoader__.load({
 				tokenStateLabel: '访问令牌',
 				tokenConfigured: '已配置',
 				tokenMissing: '未配置',
+				statusUnconfirmed: '未确认',
+				statusUnconfirmedDetail: '暂时无法读取状态。它会自动刷新，也可以点击“刷新状态”。',
+				toolsLabel: 'MCP 工具',
+				toolsReadyCount: '个就绪（mcp__supabase__*）',
+				toolsWaiting: '等待登录',
+				refreshLabel: '刷新状态',
+				disconnectLabel: '断开连接并撤销授权',
+				disconnectNote: '退出 Supabase 登录，在服务端允许时撤销授权，并从此配置中移除已存令牌与 MCP 工具。',
+				disconnectStarted: '已开始退出登录，上方状态会自动刷新。',
+				disconnectUnavailable: '退出链接不可用。请在任意会话中运行 /supabase-disconnect。',
 				endpointLabel: 'MCP 端点',
 				endpointHelp: '可用环境变量 SUPABASE_MCP_URL 限定单个项目或启用只读模式，例如 https://mcp.supabase.com/mcp?project_ref=<ref>&read_only=true。',
 				authIntro: '两种登录方式任选其一，给智能体带来的工具完全相同。',
@@ -218,6 +238,35 @@ window.__ModuleLoader__.load({
 					return syncSignInUrl();
 				}
 
+				function derivedUrl(path) {
+					try {
+						const start = syncSignInUrl();
+						if (start) return start.replace(/\/auth\/start\b/, path);
+					} catch { /* fall through */ }
+					return '';
+				}
+
+				// The Host's own snapshot, over every page fetch path that might
+				// reach it. The first source that answers wins.
+				async function fetchHostStatus() {
+					if (typeof fetch !== 'function') return null;
+					const urls = [...new Set([
+						'/api/supabase/auth/whoami',
+						'/supabase/auth/whoami',
+						derivedUrl('/auth/whoami') ? derivedUrl('/auth/whoami') : ''
+					].filter(Boolean))];
+					for (const url of urls) {
+						try {
+							const response = await fetch(url, { headers: { accept: 'application/json' } });
+							if (response && response.ok) {
+								const data = await response.json();
+								if (data && typeof data === 'object' && ('tokenConfigured' in data || 'authStartUrl' in data)) return data;
+							}
+						} catch { /* try the next source */ }
+					}
+					return null;
+				}
+
 				function ErrorCard(props) {
 					return h('div', { className: 'dsh-supabase-card' },
 						h('h3', { className: 'dsh-supabase-title' }, t('boundaryTitle')),
@@ -252,31 +301,49 @@ window.__ModuleLoader__.load({
 					const [token, setToken] = React.useState('');
 					const [busy, setBusy] = React.useState(false);
 					const [status, setStatus] = React.useState('');
-					const [configured, setConfigured] = React.useState(null);
+					const [conn, setConn] = React.useState(() => ({ tokenConfigured: null, source: null, authMethod: 'none', toolsCount: 0, toolsReady: false, error: null }));
 					const [showLink, setShowLink] = React.useState(false);
 					const [copied, setCopied] = React.useState(false);
 					const [signInUrl, setSignInUrl] = React.useState(() => authStartUrl());
+					const [notice, setNotice] = React.useState('');
 
-					const refresh = React.useCallback(() => {
+					const refresh = React.useCallback(async () => {
+						// Source 1: the Host's own snapshot (three-state, never a lie).
+						const host = await fetchHostStatus();
+						if (host !== null) {
+							setConn({
+								tokenConfigured: host.tokenConfigured === true ? true : host.tokenConfigured === false ? false : null,
+								source: typeof host.tokenSource === 'string' ? host.tokenSource : null,
+								authMethod: typeof host.authMethod === 'string' ? host.authMethod : 'none',
+								toolsCount: typeof host.toolsCount === 'number' ? host.toolsCount : 0,
+								toolsReady: Boolean(host.toolsReady),
+								error: null
+							});
+							return;
+						}
+						// Source 2: the credentials Remote, accepting any result shape.
 						const remote = credentialsRemote();
-						if (!remote || typeof remote.describe !== 'function') return;
-						try {
-							const result = remote.describe(['SUPABASE_ACCESS_TOKEN']);
-							if (result && typeof result.then === 'function') {
-								result.then((info) => {
-									try {
-										const entry = info && info['SUPABASE_ACCESS_TOKEN'];
-										setConfigured(Boolean(entry && entry.configured));
-									} catch { setConfigured(null); }
-								}, () => setConfigured(null));
+						if (remote && typeof remote.describe === 'function') {
+							try {
+								const result = remote.describe(['SUPABASE_ACCESS_TOKEN']);
+								const info = result && typeof result.then === 'function' ? await result : result;
+								const entry = info && typeof info === 'object' ? (info['SUPABASE_ACCESS_TOKEN'] ?? (Array.isArray(info) ? info[0] : info)) : undefined;
+								const flag = entry && typeof entry === 'object' && typeof entry.configured === 'boolean' ? entry.configured : null;
+								setConn((current) => ({ ...current, tokenConfigured: flag, source: entry && typeof entry.source === 'string' ? entry.source : null, error: null }));
+								return;
+							} catch (error) {
+								setConn((current) => ({ ...current, tokenConfigured: null, error: error && error.message ? error.message : String(error) }));
+								return;
 							}
-						} catch { setConfigured(null); }
+						}
+						// Nothing spoke: stay unconfirmed and say so.
+						setConn((current) => ({ ...current, tokenConfigured: null, error: 'no status source reachable' }));
 					}, []);
 
 					React.useEffect(() => { refresh(); }, [refresh]);
 
 					// The status must stay fresh across the browser round-trip of a
-					// sign-in, so refetch whenever the user comes back to the app.
+					// sign-in, so refetch on focus, on visibility, and on a quiet timer.
 					React.useEffect(() => {
 						const onFocus = () => refresh();
 						const onVisible = () => {
@@ -286,11 +353,21 @@ window.__ModuleLoader__.load({
 								refresh();
 							}
 						};
+						let timer;
+						try {
+							timer = setInterval(() => {
+								try {
+									if (typeof document === "undefined" || document.visibilityState !== "hidden") refresh();
+								} catch { refresh(); }
+							}, 15000);
+							if (timer && typeof timer.unref === "function") timer.unref();
+						} catch { /* polling is optional */ }
 						try {
 							if (typeof window !== "undefined" && typeof window.addEventListener === "function") window.addEventListener("focus", onFocus);
 							if (typeof document !== "undefined" && typeof document.addEventListener === "function") document.addEventListener("visibilitychange", onVisible);
 						} catch { /* nothing to detach */ }
 						return () => {
+							try { if (timer) clearInterval(timer); } catch { /* nothing to clear */ }
 							try {
 								if (typeof window !== "undefined" && typeof window.removeEventListener === "function") window.removeEventListener("focus", onFocus);
 								if (typeof document !== "undefined" && typeof document.removeEventListener === "function") document.removeEventListener("visibilitychange", onVisible);
@@ -375,7 +452,40 @@ window.__ModuleLoader__.load({
 							}
 						} catch { done(); }
 					};
-					const stateColor = configured === true ? 'var(--dsw-alias-state-success-primary)' : configured === false ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-state-idle-primary)';
+					const stateColor = conn.tokenConfigured === true ? 'var(--dsw-alias-state-success-primary)' : conn.tokenConfigured === false ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-state-idle-primary)';
+					const stateLabel = conn.tokenConfigured === true
+						? t('tokenConfigured') + (conn.source ? ` (${conn.source})` : '')
+						: conn.tokenConfigured === false ? t('tokenMissing') : t('statusUnconfirmed');
+					const toolsLine = conn.toolsReady ? `${conn.toolsCount} ${t('toolsReadyCount')}` : t('toolsWaiting');
+
+					const disconnectAccess = async () => {
+						setNotice(t('disconnectStarted'));
+						const candidates = [...new Set([
+							'/api/supabase/auth/disconnect?confirm=1',
+							'/supabase/auth/disconnect?confirm=1',
+							derivedUrl('/auth/disconnect') ? derivedUrl('/auth/disconnect') + '?confirm=1' : ''
+						].filter(Boolean))];
+						let done = false;
+						for (const url of candidates) {
+							try {
+								if (typeof fetch !== 'function') break;
+								const response = await fetch(url, { headers: { accept: 'text/html' } });
+								if (response && response.ok) {
+									done = true;
+									break;
+								}
+							} catch { /* try the next source */ }
+						}
+						if (!done) {
+							try {
+								const opened = window.open(candidates[0], '_blank', 'noopener');
+								if (opened && typeof opened === 'object' && 'opener' in opened) opened.opener = null;
+							} catch {
+								setNotice(t('disconnectUnavailable'));
+							}
+						}
+						refresh();
+					};
 
 					return h('div', { className: 'dsh-supabase-page' },
 						h('style', null, CSS),
@@ -389,13 +499,24 @@ window.__ModuleLoader__.load({
 								h('span', { className: 'dsh-supabase-label' }, t('tokenStateLabel')),
 								h('span', { className: 'dsh-supabase-value' },
 									h('span', { className: 'dsh-supabase-dot', style: { background: stateColor } }),
-									configured === true ? t('tokenConfigured') : t('tokenMissing'))
+									stateLabel),
+								h('button', { className: 'dsh-supabase-btn dsh-supabase-btn-ghost', type: 'button', onClick: refresh }, t('refreshLabel'))
+							),
+							conn.tokenConfigured === null ? h('p', { className: 'dsh-supabase-note' }, t('statusUnconfirmedDetail')) : null,
+							h('div', { className: 'dsh-supabase-row' },
+								h('span', { className: 'dsh-supabase-label' }, t('toolsLabel')),
+								h('span', { className: 'dsh-supabase-value' }, toolsLine)
 							),
 							h('div', { className: 'dsh-supabase-row' },
 								h('span', { className: 'dsh-supabase-label' }, t('endpointLabel')),
 								h('span', { className: 'dsh-supabase-value' }, endpoint)
 							),
-							h('p', { className: 'dsh-supabase-note' }, t('endpointHelp'))
+							h('p', { className: 'dsh-supabase-note' }, t('endpointHelp')),
+							conn.tokenConfigured !== false ? h('div', { className: 'dsh-supabase-actions' },
+								h('button', { className: 'dsh-supabase-btn dsh-supabase-btn-ghost', type: 'button', onClick: disconnectAccess }, t('disconnectLabel'))
+							) : null,
+							h('p', { className: 'dsh-supabase-note' }, t('disconnectNote')),
+							notice ? h('p', { className: 'dsh-supabase-status', 'aria-live': 'polite' }, notice) : null
 						),
 						h('div', { className: 'dsh-supabase-card' },
 							h('h3', { className: 'dsh-supabase-title' }, t('signInTitle')),
@@ -424,7 +545,7 @@ window.__ModuleLoader__.load({
 									onChange: (event) => setToken(event.target.value)
 								}),
 								h('button', { className: 'dsh-supabase-btn dsh-supabase-btn-primary', type: 'button', disabled: busy || token.length === 0, onClick: save }, busy ? t('saving') : t('save')),
-								configured === true ? h('button', { className: 'dsh-supabase-btn dsh-supabase-btn-ghost', type: 'button', disabled: busy, onClick: remove }, t('remove')) : null
+								conn.tokenConfigured === true ? h('button', { className: 'dsh-supabase-btn dsh-supabase-btn-ghost', type: 'button', disabled: busy, onClick: remove }, t('remove')) : null
 							),
 							h('p', { className: 'dsh-supabase-note' }, t('tokenHelp'), ' ', h('a', { className: 'dsh-supabase-link', href: 'https://supabase.com/dashboard/account/tokens', target: '_blank', rel: 'noreferrer' }, t('tokenCreateLink'))),
 							status ? h('p', { className: 'dsh-supabase-status', 'aria-live': 'polite' }, status) : null

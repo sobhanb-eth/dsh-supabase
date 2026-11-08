@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 const { apply } = await import("../index.js");
 
 function makeCtx() {
-	const recorded = { providers: [], sections: [], listeners: [], commands: [], tools: [], edited: [], routes: [], sets: [], records: [] };
+	const recorded = { providers: [], sections: [], listeners: [], commands: [], tools: [], edited: [], routes: [], sets: [], unsets: [], deleted: [], records: [] };
 	const recordStore = new Map();
 	const ctx = {
 		effect(fn) {
@@ -68,6 +68,13 @@ function makeCtx() {
 					},
 					set: async (key, value) => {
 						recorded.sets.push({ key, value });
+					},
+					unset: async (key) => {
+						recorded.unsets.push(key);
+					},
+					deleteRecord: async (key) => {
+						recordStore.delete(key);
+						recorded.deleted.push(key);
 					}
 				};
 			}
@@ -164,11 +171,12 @@ assert.ok(loadedPg.content.includes("Postgres best practices"), "vendored postgr
 assert.equal(recorded.sections.length, 1, "one prompt section");
 assert.ok(recorded.sections[0].text.includes("mcp__supabase__"), "guidance names the tool namespace");
 
-// Auth routes registered on the web server, mirrored under /api for the shell fetch bridge.
-assert.equal(recorded.routes.length, 6, "three routes, each mirrored under /api");
+// Auth routes registered on the web server, each mirrored under /api for the shell fetch bridge.
+assert.equal(recorded.routes.length, 8, "four routes, each mirrored under /api");
 const paths = recorded.routes.map((r) => r.path);
 assert.deepEqual(paths, [
 	"/supabase/auth/whoami", "/api/supabase/auth/whoami",
+	"/supabase/auth/disconnect", "/api/supabase/auth/disconnect",
 	"/supabase/auth/start", "/api/supabase/auth/start",
 	"/supabase/auth/callback", "/api/supabase/auth/callback"
 ]);
@@ -224,9 +232,9 @@ const failed = await callbackRoute.resource(new Request(`http://127.0.0.1:63928/
 assert.ok((await failed.text()).includes("client_secret required"), "server error body is echoed on failure");
 tokenFailBody = undefined;
 
-// Commands: four registered with distinct plugin-namespaced identities.
-assert.deepEqual(recorded.commands.map((c) => c.name), ["supabase", "supabase-auth", "supabase-connect", "supabase-review"]);
-assert.equal(new Set(recorded.commands.map((c) => c.definitionId)).size, 4, "each command carries its own definitionId");
+// Commands: five registered with distinct plugin-namespaced identities.
+assert.deepEqual(recorded.commands.map((c) => c.name), ["supabase", "supabase-auth", "supabase-connect", "supabase-disconnect", "supabase-review"]);
+assert.equal(new Set(recorded.commands.map((c) => c.definitionId)).size, 5, "each command carries its own definitionId");
 const status = await recorded.commands[0].handler({});
 assert.equal(status.kind, "success");
 assert.ok(status.text.includes("Supabase integration status"), "status command output");
@@ -240,7 +248,7 @@ const connect = await recorded.commands[2].handler({});
 assert.equal(connect.kind, "success");
 assert.ok(connect.text.includes("reloaded"), "connect command reloads the MCP row");
 assert.deepEqual(recorded.edited.at(-1), { entryId: "mcp-row-42", config: { toolCallTimeoutMs: 60001 } }, "reconnect nudges the matched MCP row");
-const review = await recorded.commands[3].handler({});
+const review = await recorded.commands.find((c) => c.name === "supabase-review").handler({});
 assert.ok(review.text.includes("RLS is enabled"), "review checklist output");
 
 // Agent tool: registered and executable.
@@ -301,6 +309,19 @@ assert.equal(injectTable.length, 1, "one index injection row");
 assert.equal(injectTable[0].kind, "global", "global boot row");
 assert.equal(injectTable[0].name, "__DSH_SUPABASE__");
 assert.equal(injectTable[0].value.authStartUrl, "http://127.0.0.1:63928/supabase/auth/start", "Host origin carried to the page");
+
+// Disconnect is terminal: run it last, after every test that needs the grant.
+const disconnectRoute = recorded.routes.find((r) => r.path === "/supabase/auth/disconnect");
+const noConfirm = await disconnectRoute.resource(new Request("http://127.0.0.1:63928/supabase/auth/disconnect"));
+assert.ok((await noConfirm.text()).includes("Confirm sign-out"), "disconnect requires confirmation");
+assert.equal(recorded.deleted.length, 0, "no cleanup without confirmation");
+const editsBeforeDisc = recorded.edited.length;
+const disc = await disconnectRoute.resource(new Request("http://127.0.0.1:63928/supabase/auth/disconnect?confirm=1"));
+assert.ok((await disc.text()).includes("disconnected"), "disconnect completes");
+assert.deepEqual(recorded.deleted, ["dsh-supabase/oauth"], "grant record deleted");
+assert.ok(recorded.unsets.includes("SUPABASE_ACCESS_TOKEN"), "access token unset");
+assert.equal(process.env.SUPABASE_ACCESS_TOKEN, undefined, "env bridge cleared");
+assert.equal(recorded.edited.length, editsBeforeDisc + 1, "connection reloaded after disconnect");
 
 globalThis.fetch = realFetch;
 delete process.env.SUPABASE_ACCESS_TOKEN;
@@ -434,10 +455,20 @@ page3 = renderPage();
 assert.ok(JSON.stringify(page3).includes("http://transport.example/supabase/auth/start"), "link row revealed");
 delete globalThis.__DSH_TRANSPORT__;
 
-// The whoami probe through the fetch bridge supplies the URL.
+// The whoami probe through the fetch bridge supplies the URL and the status.
+const whoamiPayload = {
+	authStartUrl: "http://probe.example/supabase/auth/start",
+	origin: "http://probe.example",
+	tokenConfigured: true,
+	tokenSource: "file",
+	authMethod: "browser sign-in (Supabase account)",
+	toolsCount: 31,
+	toolsReady: true
+};
 globalThis.fetch = async (url) => {
-	assert.equal(String(url), "/api/supabase/auth/whoami");
-	return { ok: true, json: async () => ({ authStartUrl: "http://probe.example/supabase/auth/start" }) };
+	const target = String(url);
+	assert.ok(target.includes("whoami"), `unexpected fetch ${target}`);
+	return { ok: true, json: async () => whoamiPayload };
 };
 hookState.length = 0;
 let page4 = renderPage();
@@ -463,6 +494,51 @@ opened.length = 0;
 await signInButton4.props.onClick();
 assert.deepEqual(opened, ["http://injected.example/supabase/auth/start"], "injected Host URL is used");
 delete globalThis.__DSH_SUPABASE__;
+
+// --- Live status: three-state display driven by the Host snapshot ----------
+const disconnectCalls = [];
+globalThis.fetch = async (url) => {
+	const target = String(url);
+	if (target.includes("whoami")) return { ok: true, json: async () => whoamiPayload };
+	if (target.includes("disconnect")) {
+		disconnectCalls.push(target);
+		return { ok: true };
+	}
+	throw new Error(`unexpected fetch ${target}`);
+};
+window.location = { origin: "null" };
+hookState.length = 0;
+let statusPage = renderPage();
+const refreshBtn = findElem(statusPage, (n) => n.type === "button" && n.children?.[0] === "t:refreshLabel");
+assert.ok(refreshBtn, "refresh button present");
+await refreshBtn.props.onClick();
+statusPage = renderPage();
+const statusFlat = JSON.stringify(statusPage);
+assert.ok(statusFlat.includes("t:tokenConfigured"), "confirmed state shown from the Host snapshot");
+assert.ok(statusFlat.includes("31 t:toolsReadyCount"), "live MCP tool count shown");
+assert.ok(statusFlat.includes("t:disconnectLabel"), "disconnect action present");
+
+// Disconnect sends the confirmed sign-out and reports it.
+const disconnectBtn = findElem(statusPage, (n) => n.type === "button" && n.children?.[0] === "t:disconnectLabel");
+assert.ok(disconnectBtn, "disconnect button found");
+await disconnectBtn.props.onClick();
+assert.ok(disconnectCalls.some((u) => u.includes("disconnect?confirm=1")), "disconnect sends confirm=1");
+statusPage = renderPage();
+assert.ok(JSON.stringify(statusPage).includes("t:disconnectStarted"), "disconnect feedback shown");
+
+// Unconfirmed state: nothing speaks, and the page says so instead of lying.
+globalThis.fetch = async () => {
+	throw new Error("all sources down");
+};
+hookState.length = 0;
+let unconfirmedPage = renderPage();
+const refreshBtn2 = findElem(unconfirmedPage, (n) => n.type === "button" && n.children?.[0] === "t:refreshLabel");
+await refreshBtn2.props.onClick();
+unconfirmedPage = renderPage();
+const unflat = JSON.stringify(unconfirmedPage);
+assert.ok(unflat.includes("t:statusUnconfirmed"), "unconfirmed state shown distinctly");
+assert.ok(!unflat.includes("t:tokenMissing"), "unconfirmed is never reported as missing");
+globalThis.fetch = realFetch2;
 
 const { readFile } = await import("node:fs/promises");
 for (const file of ["../client.js", "../index.js", "../README.md"]) {

@@ -48,6 +48,8 @@ const AUTH_START_PATH = "/supabase/auth/start";
 const AUTH_CALLBACK_PATH = "/supabase/auth/callback";
 /** Local route path that reports the Host origin to the settings page. */
 const AUTH_WHOAMI_PATH = "/supabase/auth/whoami";
+/** Local route path that signs out and revokes stored credentials. */
+const AUTH_DISCONNECT_PATH = "/supabase/auth/disconnect";
 /** Pages bridge fetch through the /api channel, so routes are mirrored there. */
 const API_PREFIX = "/api";
 /** The hosted Supabase MCP endpoint this bundle connects to. */
@@ -210,7 +212,8 @@ async function discoverOAuth(mcpUrl, fetchFn) {
 				return {
 					authorizationEndpoint: metadata.authorization_endpoint,
 					tokenEndpoint: metadata.token_endpoint,
-					registrationEndpoint: typeof metadata.registration_endpoint === "string" ? metadata.registration_endpoint : undefined
+					registrationEndpoint: typeof metadata.registration_endpoint === "string" ? metadata.registration_endpoint : undefined,
+					revocationEndpoint: typeof metadata.revocation_endpoint === "string" ? metadata.revocation_endpoint : undefined
 				};
 			}
 		} catch { /* try the next metadata document */ }
@@ -449,51 +452,133 @@ const REVIEW_CHECKLIST = `Supabase security review checklist (run before shippin
 8. Storage upserts grant INSERT + SELECT + UPDATE; public grants come with RLS.
 9. Package installs pin versions and commit lockfiles.`;
 
-/** Report the integration status as one bounded human-readable block. */
-async function statusText(ctx, config) {
+/**
+ * The integration state as plain facts. One source for the /supabase report,
+ * the whoami route the settings page polls, and the disconnect flow.
+ * tokenConfigured is three-state: true (confirmed), false (confirmed missing),
+ * or null (unconfirmed read). The three are never conflated.
+ */
+async function connectionSnapshot(ctx, config) {
 	const credentials = ctx.get("credentials");
-	let tokenState = "not configured";
-	let authMethod = "none";
+	let tokenConfigured = null;
+	let tokenSource;
 	if (credentials !== undefined) {
 		try {
 			const info = await credentials.describe(TOKEN_KEY);
-			if (info?.configured) tokenState = `configured (${info.source ?? "stored"})`;
-		} catch {
-			if (process.env[TOKEN_KEY]) tokenState = "configured (environment)";
+			if (info !== undefined && typeof info.configured === "boolean") {
+				tokenConfigured = info.configured;
+				tokenSource = info.source;
+			}
+		} catch { /* leave the read unconfirmed */ }
+		if (tokenConfigured === null && process.env[TOKEN_KEY]) {
+			tokenConfigured = true;
+			tokenSource = "environment";
 		}
-		try {
-			const record = await credentials.readRecord(OAUTH_RECORD);
-			if (record?.payload?.refresh_token !== undefined) authMethod = "browser sign-in (Supabase account)";
-			else if (tokenState.startsWith("configured")) authMethod = "personal access token";
-		} catch { /* keep the fallback */ }
 	}
-	const endpoint = process.env.SUPABASE_MCP_URL || DEFAULT_MCP_URL;
-	let toolsState = "none yet (they appear once the connection authenticates)";
-	let toolsReady = false;
+	let authMethod = "none";
+	let hasGrant = false;
 	try {
-		const live = ctx.tools.definitions().filter((definition) => typeof definition.name === "string" && definition.name.startsWith("mcp__supabase__"));
-		if (live.length > 0) {
-			toolsState = `${live.length} ready (mcp__supabase__*)`;
-			toolsReady = true;
+		const record = await credentials?.readRecord(OAUTH_RECORD);
+		if (record?.payload?.refresh_token !== undefined) {
+			hasGrant = true;
+			authMethod = "browser sign-in (Supabase account)";
+		} else if (tokenConfigured === true) {
+			authMethod = "personal access token";
 		}
 	} catch { /* keep the fallback */ }
-	const failed = diagnostics.filter((entry) => !entry.ok);
-	const origin = typeof ctx.get === "function" ? safeOrigin(ctx) : undefined;
+	let toolsCount = 0;
+	try {
+		toolsCount = ctx.tools.definitions().filter((definition) => typeof definition.name === "string" && definition.name.startsWith("mcp__supabase__")).length;
+	} catch { /* keep zero */ }
+	return {
+		tokenConfigured,
+		tokenSource,
+		authMethod,
+		hasGrant,
+		toolsCount,
+		toolsReady: toolsCount > 0,
+		endpoint: process.env.SUPABASE_MCP_URL || DEFAULT_MCP_URL,
+		guardrails: {
+			confirmDestructiveSql: config.confirmDestructiveSql,
+			confirmCostlyOperations: config.confirmCostlyOperations,
+			confirmProjectAffecting: config.confirmProjectAffecting
+		},
+		features: diagnostics.filter((entry) => !entry.ok).map((entry) => entry.feature),
+		origin: safeOrigin(ctx) ?? null
+	};
+}
+
+/** Report the integration status as one bounded human-readable block. */
+async function statusText(ctx, config) {
+	const snapshot = await connectionSnapshot(ctx, config);
+	const tokenState = snapshot.tokenConfigured === true
+		? `configured (${snapshot.tokenSource ?? "stored"})`
+		: snapshot.tokenConfigured === false ? "not configured" : "unknown (status read unavailable)";
+	const toolsState = snapshot.toolsReady ? `${snapshot.toolsCount} ready (mcp__supabase__*)` : "none yet (they appear once the connection authenticates)";
 	return [
 		"Supabase integration status",
 		`- Access token: ${tokenState}`,
-		`- Sign-in method: ${authMethod}`,
-		`- MCP endpoint: ${endpoint}`,
+		`- Sign-in method: ${snapshot.authMethod}`,
+		`- MCP endpoint: ${snapshot.endpoint}`,
 		`- MCP tools: ${toolsState}`,
 		"- Skills: supabase, supabase-postgres-best-practices",
-		`- Guardrails: destructive SQL ${config.confirmDestructiveSql ? "asks" : "off"}; chargeable operations ${config.confirmCostlyOperations ? "asks" : "off"}; project-affecting operations ${config.confirmProjectAffecting ? "asks" : "off"}`,
-		failed.length === 0 ? "- Features: all registered" : `- Features: ${failed.length} failed (${failed.map((entry) => entry.feature).join(", ")})`,
-		toolsReady
+		`- Guardrails: destructive SQL ${snapshot.guardrails.confirmDestructiveSql ? "asks" : "off"}; chargeable operations ${snapshot.guardrails.confirmCostlyOperations ? "asks" : "off"}; project-affecting operations ${snapshot.guardrails.confirmProjectAffecting ? "asks" : "off"}`,
+		snapshot.features.length === 0 ? "- Features: all registered" : `- Features: ${snapshot.features.length} failed (${snapshot.features.join(", ")})`,
+		snapshot.toolsReady
 			? "Next step: ask the agent something, for example: What tables are in my database?"
-			: tokenState.startsWith("configured")
+			: snapshot.tokenConfigured === true
 				? "Next step: run /supabase-connect to reload the connection, then ask the agent to list your tables."
-				: `Next step: open Settings > Supabase and click "Connect Supabase account", or paste a scoped personal access token.${origin === undefined ? "" : ` Browser sign-in link: ${origin}${AUTH_START_PATH}`}`
+				: `Next step: open Settings > Supabase and click "Connect Supabase account", or paste a scoped personal access token.${snapshot.origin === null ? "" : ` Browser sign-in link: ${snapshot.origin}${AUTH_START_PATH}`}`
 	].join("\n");
+}
+
+/** Best-effort RFC 7009 token revocation; local cleanup happens regardless. */
+async function revokeGrant(ctx, fetchFn, log) {
+	try {
+		const record = await ctx.get("credentials")?.readRecord(OAUTH_RECORD);
+		const payload = record?.payload ?? {};
+		const token = payload.refresh_token || process.env[TOKEN_KEY];
+		if (payload.token_url && token) {
+			const registration = {
+				clientId: payload.client_id ?? "dsh-supabase",
+				clientSecret: payload.client_secret,
+				method: payload.token_auth_method ?? (payload.client_secret ? "client_secret_post" : "none")
+			};
+			const params = new URLSearchParams({ token, client_id: registration.clientId });
+			const headers = { "content-type": "application/x-www-form-urlencoded" };
+			if (registration.clientSecret) {
+				if (registration.method === "client_secret_basic") headers.authorization = `Basic ${Buffer.from(`${registration.clientId}:${registration.clientSecret}`).toString("base64")}`;
+				else params.set("client_secret", registration.clientSecret);
+			}
+			const revocationUrl = payload.revocation_url ?? payload.token_url;
+			const response = await fetchFn(revocationUrl, { method: "POST", headers, body: params.toString(), signal: AbortSignal.timeout(10_000) });
+			if (!response.ok) log(`token revocation returned ${response.status}; local sign-out continues`);
+		}
+	} catch (error) {
+		log(`token revocation failed; local sign-out continues: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+/**
+ * Sign out completely: revoke server-side (best effort), delete the grant and
+ * the token, clear the env bridge and refresh timer, and reload the connection
+ * so the MCP tools drop out.
+ */
+async function disconnect(ctx, fetchFn, log) {
+	await revokeGrant(ctx, fetchFn, log);
+	const credentials = ctx.get("credentials");
+	if (credentials !== undefined) {
+		try { await credentials.deleteRecord(OAUTH_RECORD); } catch { /* already gone */ }
+		try { await credentials.unset(TOKEN_KEY); } catch { /* already gone */ }
+	}
+	delete process.env[TOKEN_KEY];
+	if (refreshTimer !== undefined) {
+		clearTimeout(refreshTimer);
+		refreshTimer = undefined;
+	}
+	registeredClients.clear();
+	const reload = await reconnect(ctx);
+	return `Supabase disconnected. Stored tokens are removed and the sign-in is revoked where the server allowed it. The MCP tools are being unloaded. ${reload}`;
 }
 
 /** The web GUI origin, when the listener is up. */
@@ -601,12 +686,28 @@ function apply(ctx, config) {
 			const routes = [
 				{
 					path: AUTH_WHOAMI_PATH,
-					resource: () => {
-						const origin = safeOrigin(ctx);
+					resource: async () => {
+						const snapshot = await connectionSnapshot(ctx, toggles);
 						return Response.json({
-							authStartUrl: origin === undefined ? "" : `${origin}${AUTH_START_PATH}`,
-							origin: origin ?? ""
+							authStartUrl: snapshot.origin === null ? "" : `${snapshot.origin}${AUTH_START_PATH}`,
+							origin: snapshot.origin ?? "",
+							tokenConfigured: snapshot.tokenConfigured,
+							tokenSource: snapshot.tokenSource ?? null,
+							authMethod: snapshot.authMethod,
+							toolsCount: snapshot.toolsCount,
+							toolsReady: snapshot.toolsReady
 						}, { headers: { "access-control-allow-origin": "*" } });
+					}
+				},
+				{
+					path: AUTH_DISCONNECT_PATH,
+					resource: async (request) => {
+						const confirm = new URL(request.url).searchParams.get("confirm");
+						if (confirm !== "1") {
+							return resultPage("Confirm sign-out", "This link signs you out of Supabase and removes stored tokens. Start it from the Supabase settings page so the confirmation is intentional.");
+						}
+						const text = await disconnect(ctx, fetchFn, log);
+						return resultPage("Supabase disconnected", "Your Supabase sign-in is revoked and the stored tokens are removed. The MCP tools are unloading. You can close this tab and sign in again any time.");
 					}
 				},
 				{
@@ -697,6 +798,11 @@ function apply(ctx, config) {
 					const reload = await reconnect(ctx);
 					return { kind: "success", text: `${status}\n\n${reload}` };
 				})
+			},
+			{
+				name: "supabase-disconnect",
+				description: "Sign out of Supabase, revoke the sign-in, and remove stored tokens",
+				handler: handler(async () => ({ kind: "success", text: await disconnect(ctx, fetchFn, log) }))
 			},
 			{
 				name: "supabase-review",
