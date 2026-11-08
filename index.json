@@ -41,6 +41,18 @@
       },
       "versions": [
         {
+          "version": "1.0.3",
+          "publishTimestamp": 1794144406,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/sobhanb-eth/dsh-supabase",
+            "commit": "df4adb03ec0a8916edd7a3924d0d984ab2233ddf"
+          },
+          "engines": {
+            "dsh": ">=0.2.2-rc.1"
+          }
+        },
+        {
           "version": "1.0.2",
           "publishTimestamp": 1794143792,
           "source": {
