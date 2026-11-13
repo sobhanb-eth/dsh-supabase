@@ -74,6 +74,19 @@ try {
 	if (typeof brandModule.CommandDefinitionId === "function") commandDefinitionId = brandModule.CommandDefinitionId;
 } catch { /* fall back to identity */ }
 
+/**
+ * Services are resolved at call time. Activation order between rows differs
+ * across Harness releases, so features needing a late service are wired
+ * through ctx.inject and resolved there when the service appears.
+ */
+function service(ctx, name) {
+	try {
+		const value = ctx?.get?.(name);
+		if (value !== undefined) return value;
+	} catch { /* service not available */ }
+	return undefined;
+}
+
 /** Registration diagnostics surfaced to the user and written to disk. */
 const diagnostics = [];
 function record(ok, feature, detail) {
@@ -356,7 +369,7 @@ function resultPage(title, body) {
 
 /** Nudge the MCP row to reload so a rotated token or URL takes effect. */
 async function reconnect(ctx) {
-	const editor = ctx.get("configEditor");
+	const editor = service(ctx, "configEditor");
 	if (editor === undefined) return "Automatic reconnect is unavailable in this profile. Reload the profile or restart DSH to apply credential changes.";
 	try {
 		// The installed row's id is chosen by the profile; find it by the
@@ -392,7 +405,7 @@ async function reconnect(ctx) {
  * reads, then a reconnect.
  */
 async function commitAccessToken(ctx, accessToken) {
-	const credentials = ctx.get("credentials");
+	const credentials = service(ctx, "credentials");
 	if (credentials !== undefined) {
 		await credentials.set(TOKEN_KEY, accessToken);
 	}
@@ -402,7 +415,7 @@ async function commitAccessToken(ctx, accessToken) {
 
 /** Store the OAuth grant record used for later refreshes. */
 async function commitGrant(ctx, payload) {
-	const credentials = ctx.get("credentials");
+	const credentials = service(ctx, "credentials");
 	if (credentials === undefined) return;
 	await credentials.modifyRecord(OAUTH_RECORD, async () => ({ kind: "grant", payload }));
 }
@@ -415,7 +428,7 @@ function scheduleRefresh(ctx, expiresIn, metadata, registration, fetchFn, log) {
 	refreshTimer = setTimeout(() => {
 		void (async () => {
 			try {
-				const credentials = ctx.get("credentials");
+				const credentials = service(ctx, "credentials");
 				const record = await credentials?.readRecord(OAUTH_RECORD);
 				const payload = record?.payload ?? {};
 				const refreshToken = payload.refresh_token;
@@ -469,7 +482,7 @@ const REVIEW_CHECKLIST = `Supabase security review checklist (run before shippin
  * or null (unconfirmed read). The three are never conflated.
  */
 async function connectionSnapshot(ctx, config) {
-	const credentials = ctx.get("credentials");
+	const credentials = service(ctx, "credentials");
 	let tokenConfigured = null;
 	let tokenSource;
 	if (credentials !== undefined) {
@@ -547,7 +560,7 @@ async function statusText(ctx, config) {
  * ordinary config field rebuilds the plugin with the new values immediately.
  */
 async function setGuardToggles(ctx, updates) {
-	const editor = ctx.get("configEditor");
+	const editor = service(ctx, "configEditor");
 	const entry = ctx.fiber?.entry;
 	if (editor === undefined || entry === undefined) {
 		return "Guardrail settings cannot be saved in this profile. Edit the supabase row configuration manually instead.";
@@ -595,7 +608,7 @@ async function guardCommand(ctx, config, rawInput) {
 /** Best-effort RFC 7009 token revocation; local cleanup happens regardless. */
 async function revokeGrant(ctx, fetchFn, log) {
 	try {
-		const record = await ctx.get("credentials")?.readRecord(OAUTH_RECORD);
+		const record = await service(ctx, "credentials")?.readRecord(OAUTH_RECORD);
 		const payload = record?.payload ?? {};
 		const token = payload.refresh_token || process.env[TOKEN_KEY];
 		if (payload.token_url && token) {
@@ -626,7 +639,7 @@ async function revokeGrant(ctx, fetchFn, log) {
  */
 async function disconnect(ctx, fetchFn, log) {
 	await revokeGrant(ctx, fetchFn, log);
-	const credentials = ctx.get("credentials");
+	const credentials = service(ctx, "credentials");
 	if (credentials !== undefined) {
 		try { await credentials.deleteRecord(OAUTH_RECORD); } catch { /* already gone */ }
 		try { await credentials.unset(TOKEN_KEY); } catch { /* already gone */ }
@@ -644,7 +657,7 @@ async function disconnect(ctx, fetchFn, log) {
 /** The web GUI origin, when the listener is up. */
 function safeOrigin(ctx) {
 	try {
-		const webServer = ctx.get("webServer");
+		const webServer = service(ctx, "webServer");
 		return webServer?.getOrigin?.();
 	} catch {
 		return undefined;
@@ -671,6 +684,16 @@ function apply(ctx, config) {
 	const fetchFn = (...args) => globalThis.fetch(...args);
 	const mcpUrl = () => process.env.SUPABASE_MCP_URL || DEFAULT_MCP_URL;
 
+	// Presence-scoped service refs: they re-check the live service at call time,
+	// so a service that is absent now is honored even if it appeared earlier.
+	let userQuestionsRef = () => undefined;
+	let approvalRef = () => undefined;
+	ctx.inject(["userQuestions"], (scope) => {
+		userQuestionsRef = () => scope.userQuestions ?? scope.get?.("userQuestions");
+	});
+	ctx.inject(["approval"], (scope) => {
+		approvalRef = () => scope.approval ?? scope.get?.("approval");
+	});
 	ctx.effect(function* () {
 		// --- Skills -----------------------------------------------------------
 		try {
@@ -693,18 +716,21 @@ function apply(ctx, config) {
 			yield ctx.on("tools/pre-execute", async (exec, next) => {
 				if (typeof exec.name !== "string" || !exec.name.startsWith("mcp__supabase__")) return next();
 				const tool = exec.name.slice("mcp__supabase__".length);
-				// Confirmation strategy:
-				//  1. the standard approval dialog, when the session can prompt;
-				//  2. otherwise the user-question dialogue (the same channel as
-				//     ask_user_question), which works even where approval
-				//     prompts are disabled;
-				//  3. otherwise a clear block naming the user-side remedies.
-				let canAsk = true;
-				try {
-					const approval = ctx.get("approval");
-					const policy = approval?.overrideOf?.(exec.agent?.session);
-					canAsk = policy !== "never";
-				} catch { /* assume prompting works */ }
+				// An ask is only usable when some channel can surface it: the
+				// question dialogue (always) or an approval prompt (which needs
+				// both the approval service and a policy that can prompt).
+				const userQuestions = userQuestionsRef();
+				const canPromptApproval = (() => {
+					try {
+						const approval = approvalRef();
+						if (approval === undefined) return false;
+						const policy = approval.overrideOf?.(exec.agent?.session);
+						return policy !== "never";
+					} catch {
+						return false;
+					}
+				})();
+				const canAsk = userQuestions !== undefined || canPromptApproval;
 				const blocked = (reason) => ({
 					kind: "deny",
 					reason: `${reason}. No confirmation channel answered, so this call is blocked instead of silently approved. Remedies: the Safety toggles on Settings > Supabase, the chat command /supabase guard destructive off (or costly/project), or a session where approval prompts are enabled. The tool body was not executed.`,
@@ -719,8 +745,7 @@ function apply(ctx, config) {
 					project: "confirmProjectAffecting"
 				};
 				const confirm = async (category, reason, en, zh) => {
-					if (canAsk) return askDecision(reason, en, zh);
-					const userQuestions = ctx.get("userQuestions");
+					if (canPromptApproval) return askDecision(reason, en, zh);
 					if (userQuestions !== undefined && exec.agent !== undefined) {
 						try {
 							const answer = await userQuestions.ask({
@@ -737,7 +762,8 @@ function apply(ctx, config) {
 								agent: exec.agent,
 								signal: exec.signal
 							});
-							const item = (answer?.answers ?? []).find((entry) => entry.id === "supabase-guard");
+							const item = (answer?.answers ?? []).find((entry) => entry.id === "supabase-guard")
+								?? (answer?.answers ?? [])[0];
 							const chosen = (item?.selected ?? [])[0];
 							if (typeof chosen === "string" && chosen.startsWith("Yes")) {
 								if (chosen.includes("stop asking")) {
@@ -802,8 +828,12 @@ function apply(ctx, config) {
 		}
 
 		// --- Browser OAuth routes -------------------------------------------
+		// webServer can activate after this row (activation order differs
+		// across Harness releases), so wire the routes whenever it appears.
+		ctx.inject(["webServer"], (scope) => {
+		scope.effect(function* () {
 		try {
-			const webServer = ctx.get("webServer");
+			const webServer = service(ctx, "webServer");
 			if (webServer === undefined) throw new Error("webServer service unavailable in this profile");
 			// Publish the real sign-in URL into the page boot data. Shells that
 			// do not serve the UI over http (window.location.origin is unusable
@@ -933,6 +963,9 @@ function apply(ctx, config) {
 		} catch (error) {
 			record(false, "auth-routes", error instanceof Error ? error.message : error);
 		}
+		flushDiagnostics();
+		}, "dsh-supabase routes");
+		});
 
 		// --- Commands --------------------------------------------------------
 		const handler = (fn) => async (invocation) => {
@@ -1034,9 +1067,11 @@ function apply(ctx, config) {
 			record(false, "tool:supabase_status", error instanceof Error ? error.message : error);
 		}
 
-		// --- Credential watch: env bridge plus reconnect on change -----------
+		// --- Credential watch and hydration, wired when credentials appear ---
+		ctx.inject(["credentials"], (scope) => {
+		scope.effect(function* () {
 		try {
-			const credentials = ctx.get("credentials");
+			const credentials = service(ctx, "credentials");
 			if (credentials !== undefined) {
 				yield ctx.on("credentials/reference-updated", (ref) => {
 					if (String(ref) !== TOKEN_KEY) return;
@@ -1061,7 +1096,7 @@ function apply(ctx, config) {
 
 		// --- Hydrate the env bridge from the store, then refresh if stale ----
 		try {
-			const credentials = ctx.get("credentials");
+			const credentials = service(ctx, "credentials");
 			if (credentials !== undefined) {
 				void (async () => {
 					try {
@@ -1103,7 +1138,11 @@ function apply(ctx, config) {
 		} catch (error) {
 			record(false, "token-hydration", error instanceof Error ? error.message : error);
 		}
+		flushDiagnostics();
+		}, "dsh-supabase credentials");
+		});
 
+		// Late-service refs for the guards are wired above at activation.
 		flushDiagnostics();
 		yield () => {
 			if (refreshTimer !== undefined) clearTimeout(refreshTimer);

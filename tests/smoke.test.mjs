@@ -19,10 +19,16 @@ import assert from "node:assert/strict";
 const { apply } = await import("../index.js");
 
 function makeCtx() {
-	const recorded = { providers: [], sections: [], listeners: [], commands: [], tools: [], edited: [], routes: [], sets: [], unsets: [], deleted: [], records: [], approvalPolicy: undefined, questions: [], nextAnswer: undefined, questionsDisabled: false };
+	const uid = Math.random().toString(36).slice(2, 8);
+	const recorded = { providers: [], sections: [], listeners: [], commands: [], tools: [], edited: [], routes: [], sets: [], unsets: [], deleted: [], records: [], approvalPolicy: undefined, questions: [], nextAnswer: undefined, questionsDisabled: false, injected: [], questionId: `supabase-guard-${uid}` };
 	const recordStore = new Map();
 	const ctx = {
 		fiber: { entry: { id: "supabase", name: "dsh-supabase" } },
+		inject(deps, callback) {
+			recorded.injected.push([...deps]);
+			callback(ctx);
+			return () => {};
+		},
 		effect(fn) {
 			const gen = fn();
 			for (const _disposer of gen) { /* registration walk */ }
@@ -64,8 +70,18 @@ function makeCtx() {
 				if (recorded.questionsDisabled) return undefined;
 				return {
 					ask: async (request) => {
-						recorded.questions.push(request);
-						return recorded.nextAnswer;
+						const rewritten = {
+							...request,
+							questions: request.questions.map((q) => ({ ...q, id: recorded.questionId }))
+						};
+						recorded.questions.push(rewritten);
+						if (recorded.nextAnswer === undefined) return { answers: [] };
+						return {
+							answers: recorded.nextAnswer.answers.map((a) => ({
+								...a,
+								id: a.id === "supabase-guard" ? recorded.questionId : a.id
+							}))
+						};
 					}
 				};
 			}
@@ -183,6 +199,11 @@ assert.ok(loadedPg.content.includes("Postgres best practices"), "vendored postgr
 // Prompt section.
 assert.equal(recorded.sections.length, 1, "one prompt section");
 assert.ok(recorded.sections[0].text.includes("mcp__supabase__"), "guidance names the tool namespace");
+
+// Late-service wiring: routes and credentials are requested via ctx.inject so
+// activation order between Harness releases cannot break them.
+assert.ok(recorded.injected.some((deps) => deps.includes("webServer")), "routes wait for webServer");
+assert.ok(recorded.injected.some((deps) => deps.includes("credentials")), "credential watch waits for credentials");
 
 // Auth routes registered on the web server, each mirrored under /api for the shell fetch bridge.
 assert.equal(recorded.routes.length, 10, "five routes, each mirrored under /api");
